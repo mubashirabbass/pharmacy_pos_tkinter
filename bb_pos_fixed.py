@@ -315,67 +315,6 @@ class FormDialog(tk.Toplevel):
         self.destroy()
 
 
-# -----------------------
-# Main Application
-# -----------------------
-# class App:
-#     def __init__(self):
-#         if TTB_AVAILABLE:
-#             self.root = tb.Window(themename='flatly')
-#         else:
-#             self.root = tk.Tk()
-#         self.root.title('Pharmacy Management System')
-#         self.root.geometry('1200x780')
-#         # close handler
-#         try:
-#             self.root.protocol('WM_DELETE_WINDOW', self._on_close)
-#         except Exception:
-#             pass
-#         self.db = db
-#         self.user = None
-#         self._auto_job = None
-#         self._build_login()
-
-#     def _open_profile(self):
-#             def save(d):
-#                 pw = d.get('new_password','').strip()
-#                 if pw:
-#                     self.db.execute(
-#                         'UPDATE users SET password_hash=? WHERE id=?;',
-#                         (hash_pw(pw), self.user['id'])
-#                     )
-#                     messagebox.showinfo('Profile','Password updated.')
-#             FormDialog(
-#                 self.root, 'Profile - Change Password',
-#                 [
-#                     {'key':'username','label':'Username','widget':'entry'},
-#                     {'key':'role','label':'Role','widget':'entry'},
-#                     {'key':'new_password','label':'New Password','widget':'entry'},
-#                 ],
-#                 initial={'username':self.user['username'], 'role':self.user['role']},
-#                 on_submit=save
-#             )
-
-
-#     def _on_close(self):
-#         try:
-#             if getattr(self, '_auto_job', None):
-#                 try:
-#                     self.root.after_cancel(self._auto_job)
-#                 except Exception:
-#                     pass
-#         except Exception:
-#             pass
-#         try:
-#             self.root.quit()
-#         except Exception:
-#             pass
-#         try:
-#             self.root.destroy()
-#         except Exception:
-#             pass
-
-
 class NewSaleTab(ttk.Frame):
     def __init__(self, master, db, user):
         super().__init__(master)
@@ -617,7 +556,6 @@ class App:
             self.tab_inventory = ttk.Frame(self.nb); self.nb.add(self.tab_inventory, text='Inventory')
             self.tab_pos = ttk.Frame(self.nb); self.nb.add(self.tab_pos, text='POS')
             self.tab_manage_staff = ttk.Frame(self.nb); self.nb.add(self.tab_manage_staff, text='Manage Staff')
-            self.tab_import_export = ttk.Frame(self.nb); self.nb.add(self.tab_import_export, text='Import/Export')
             self.tab_settings = ttk.Frame(self.nb); self.nb.add(self.tab_settings, text='Settings')
 
         elif self.user['role'] == 'staff':
@@ -745,7 +683,6 @@ class App:
             self._build_sale_history_tab()
             self._build_return_history_tab()
             self._build_manage_staff_tab()
-            self._build_import_export_tab()
             self._build_settings_tab()
         elif role == 'staff':
             self._build_inventory_tab()
@@ -1360,13 +1297,14 @@ class App:
         reports_tab = ttk.Frame(pos_nb)
         pos_nb.add(reports_tab, text='Sale Reports')
         try:
-            self._build_reports_in_frame(reports_tab)
-        except Exception:
+            self._build_reports_tab(reports_tab)
+        except Exception as e:
+            print(f"Error building modern reports: {e}")
+            # Fallback to old method
             try:
-                self._build_reports_tab()
+                self._build_reports_in_frame(reports_tab)
             except Exception:
                 pass
-
 
 
     def _build_sale_history_tab(self):
@@ -1467,39 +1405,143 @@ class App:
         tree.pack(fill='both', expand=True, padx=8, pady=6)
         self._report_tree = tree
 
+    # ---------------- Sale Reports Tab ----------------
+    # Add this method to your App class
+        # ---------------- Reports ----------------
     def _build_reports_tab(self):
-        # kept for fallback; builds into self.tab_reports if present
-        self._build_reports_in_frame(self.tab_reports)
+        for w in self.tab_reports.winfo_children():
+            w.destroy()
 
-    def _apply_report_filters(self, supplier, manufacturer, product, from_date):
-        tree = getattr(self, '_report_tree', None)
-        if not tree: return
-        tree.delete(*tree.get_children())
-        where = []; params = []
-        if supplier:
-            where.append('sup.name LIKE ?'); params.append(f'%{supplier}%')
-        if manufacturer:
-            where.append('m.name LIKE ?'); params.append(f'%{manufacturer}%')
-        if product:
-            where.append('p.name LIKE ?'); params.append(f'%{product}%')
-        if from_date:
-            try:
-                dt = from_date
-                if len(dt) == 10:
-                    where.append("s.created_at >= ?"); params.append(dt + " 00:00:00")
-            except:
-                pass
-        where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
-        sql = f'''SELECT s.id AS sale_id, s.created_at AS date, s.customer_name AS customer, p.name AS product, si.quantity AS qty, si.price AS price, (si.quantity*si.price) AS subtotal
-            FROM sales s JOIN sale_items si ON si.sale_id=s.id JOIN products p ON p.id=si.product_id
-            LEFT JOIN sale_item_batches sib ON sib.sale_item_id=si.id LEFT JOIN batches b ON b.id=sib.batch_id
-            LEFT JOIN suppliers sup ON sup.id=b.supplier_id
-            LEFT JOIN manufacturers m ON m.id=p.manufacturer_id
-            {where_sql}
-            ORDER BY s.created_at DESC LIMIT 1000;'''
-        rows = self.db.query(sql, tuple(params))
-        for r in rows:
-            self._report_tree.insert('', 'end', values=(r['sale_id'], r['date'], r['customer'] or '', r['product'], r['qty'], f"{r['price']:.2f}", f"{r['subtotal']:.2f}"))
+        frm = ttk.Frame(self.tab_reports, padding=10)
+        frm.pack(fill='both', expand=True)
+
+        # ---- Filters ----
+        filter_frm = ttk.LabelFrame(frm, text="Filters")
+        filter_frm.pack(fill='x', pady=6)
+
+        # Date range
+        ttk.Label(filter_frm, text="From:").pack(side='left', padx=4)
+        from_e = DateEntry(filter_frm, width=12) if TKCAL_AVAILABLE else ttk.Entry(filter_frm, width=12)
+        from_e.pack(side='left', padx=4)
+        ttk.Label(filter_frm, text="To:").pack(side='left', padx=4)
+        to_e = DateEntry(filter_frm, width=12) if TKCAL_AVAILABLE else ttk.Entry(filter_frm, width=12)
+        to_e.pack(side='left', padx=4)
+
+        # Supplier filter
+        ttk.Label(filter_frm, text="Supplier:").pack(side='left', padx=(20,4))
+        def supplier_suggestions(term):
+            rows = self.db.query("SELECT name FROM suppliers WHERE name LIKE ? LIMIT 20;", (f"%{term}%",))
+            return [r['name'] for r in rows]
+        supplier_e = AutocompleteEntry(filter_frm, suggestions_getter=supplier_suggestions, width=20)
+        supplier_e.pack(side='left', padx=4)
+
+        # Medicine filter
+        ttk.Label(filter_frm, text="Medicine:").pack(side='left', padx=(20,4))
+        def medicine_suggestions(term):
+            rows = self.db.query("SELECT name FROM products WHERE name LIKE ? LIMIT 20;", (f"%{term}%",))
+            return [r['name'] for r in rows]
+        medicine_e = AutocompleteEntry(filter_frm, suggestions_getter=medicine_suggestions, width=20)
+        medicine_e.pack(side='left', padx=4)
+
+        def load_reports():
+            tree.delete(*tree.get_children())
+            query = """SELECT s.id, s.customer_name, s.total, s.created_at, 
+                              p.name as product, sup.name as supplier
+                       FROM sales s
+                       JOIN sale_items si ON si.sale_id = s.id
+                       JOIN products p ON si.product_id = p.id
+                       LEFT JOIN batches b ON b.product_id = p.id
+                       LEFT JOIN suppliers sup ON b.supplier_id = sup.id
+                       WHERE 1=1 """
+            params = []
+
+            # Date filter
+            if from_e.get():
+                query += " AND date(s.created_at) >= date(?)"
+                params.append(from_e.get())
+            if to_e.get():
+                query += " AND date(s.created_at) <= date(?)"
+                params.append(to_e.get())
+
+            # Supplier filter
+            if supplier_e.get().strip():
+                query += " AND sup.name LIKE ?"
+                params.append(f"%{supplier_e.get().strip()}%")
+
+            # Medicine filter
+            if medicine_e.get().strip():
+                query += " AND p.name LIKE ?"
+                params.append(f"%{medicine_e.get().strip()}%")
+
+            query += " ORDER BY s.created_at DESC"
+            rows = self.db.query(query, tuple(params))
+
+            for r in rows:
+                tree.insert('', 'end', values=(
+                    r['id'], r['customer_name'], r['product'], 
+                    r['supplier'] or '-', r['total'], r['created_at']
+                ))
+
+        ttk.Button(filter_frm, text="Load Report", command=load_reports).pack(side='left', padx=20)
+
+        # ---- Report Table ----
+        cols = ("Sale ID","Customer","Medicine","Supplier","Total","Date")
+        tree = ttk.Treeview(frm, columns=cols, show="headings", height=20)
+        for col in cols:
+            tree.heading(col, text=col)
+            tree.column(col, anchor='center', width=140)
+        tree.pack(fill='both', expand=True, pady=10)
+
+        # Export buttons
+        exp_frm = ttk.Frame(frm)
+        exp_frm.pack(fill='x', pady=6)
+        ttk.Button(exp_frm, text="Export CSV", command=lambda: self._export_report(tree, "csv")).pack(side='left', padx=5)
+        ttk.Button(exp_frm, text="Export Excel", command=lambda: self._export_report(tree, "excel")).pack(side='left', padx=5)
+        ttk.Button(exp_frm, text="Export PDF", command=lambda: self._export_report(tree, "pdf")).pack(side='left', padx=5)
+
+        load_reports()  # Load initially
+
+    # ---------------- Export Helper ----------------
+    def _export_report(self, tree, fmt="csv"):
+        rows = [tree.item(i,"values") for i in tree.get_children()]
+        if not rows:
+            return messagebox.showwarning("No Data","No report data to export.")
+        filetypes = {
+            "csv": [("CSV Files","*.csv")],
+            "excel": [("Excel Files","*.xlsx")],
+            "pdf": [("PDF Files","*.pdf")]
+        }
+        ext = fmt if fmt!="excel" else "xlsx"
+        fpath = filedialog.asksaveasfilename(defaultextension=f".{ext}", filetypes=filetypes[fmt])
+        if not fpath: return
+
+        if fmt=="csv":
+            import csv
+            with open(fpath,"w",newline="",encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(("Sale ID","Customer","Medicine","Supplier","Total","Date"))
+                writer.writerows(rows)
+        elif fmt=="excel" and OPENPYXL_AVAILABLE:
+            import openpyxl
+            wb=openpyxl.Workbook(); ws=wb.active
+            ws.append(("Sale ID","Customer","Medicine","Supplier","Total","Date"))
+            for r in rows: ws.append(r)
+            wb.save(fpath)
+        elif fmt=="pdf" and REPORTLAB_AVAILABLE:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas
+            c=canvas.Canvas(fpath,pagesize=A4); width,height=A4
+            y=height-40
+            c.setFont("Helvetica-Bold",14)
+            c.drawCentredString(width/2,y,"Sales Report"); y-=30
+            c.setFont("Helvetica",9)
+            for row in rows:
+                c.drawString(40,y," | ".join(str(x) for x in row)); y-=14
+                if y<40: c.showPage(); y=height-40
+            c.save()
+        else:
+            messagebox.showerror("Error","Export format not supported or required library missing.")
+        messagebox.showinfo("Exported",f"Report saved to {fpath}")
 
     # ---------------- Manage Staff ----------------
     def _build_manage_staff_tab(self):
@@ -1603,129 +1645,6 @@ class App:
             {'key':'password','label':'Password'},
             {'key':'role','label':'Role','widget':'combobox','values':['staff','cashier']}
         ], on_submit=save)
-
-
-    # ---------------- Import/Export & Backup ----------------
-    
-
-    def _import_csv(self, target):
-        path = filedialog.askopenfilename(filetypes=[('CSV','*.csv'),('All files','*.*')])
-        if not path: return
-        cnt = 0
-        try:
-            with open(path, newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    if target == 'products':
-                        self.db.execute('INSERT OR IGNORE INTO products(name,sku,unit,sale_price,notes) VALUES(?,?,?,?,?);',
-                                        (row.get('name') or row.get('Name'), row.get('sku'), row.get('unit'), float(row.get('sale_price') or 0), row.get('notes') or ''))
-                        cnt += 1
-                    elif target == 'suppliers':
-                        self.db.execute('INSERT OR IGNORE INTO suppliers(name,phone,email,address) VALUES(?,?,?,?);', (row.get('name'), row.get('phone'), row.get('email'), row.get('address'))); cnt += 1
-                    elif target == 'manufacturers':
-                        self.db.execute('INSERT OR IGNORE INTO manufacturers(name,contact,notes) VALUES(?,?,?);', (row.get('name'), row.get('contact'), row.get('notes'))); cnt += 1
-                    elif target == 'categories':
-                        self.db.execute('INSERT OR IGNORE INTO categories(name,notes) VALUES(?,?);', (row.get('name'), row.get('notes'))); cnt += 1
-                    elif target == 'formulas':
-                        self.db.execute('INSERT OR IGNORE INTO formulas(name,composition) VALUES(?,?);', (row.get('name'), row.get('composition'))); cnt += 1
-                    elif target == 'customers':
-                        self.db.execute('INSERT OR IGNORE INTO customers(name,phone,notes) VALUES(?,?,?);', (row.get('name'), row.get('phone'), row.get('notes'))); cnt += 1
-                    elif target == 'batches':
-                        pid = None
-                        if row.get('product_sku'):
-                            p = self.db.query('SELECT id FROM products WHERE sku=?;',(row.get('product_sku'),))
-                            if p: pid = p[0]['id']
-                        if not pid and row.get('product_name'):
-                            p = self.db.query('SELECT id FROM products WHERE name=?;',(row.get('product_name'),))
-                            if p: pid = p[0]['id']
-                        sid = None
-                        if row.get('supplier'):
-                            s = self.db.query('SELECT id FROM suppliers WHERE name=?;',(row.get('supplier'),))
-                            if s: sid = s[0]['id']
-                        if pid:
-                            self.db.execute('INSERT INTO batches(product_id,supplier_id,batch_no,quantity,expiry_date,cost_price,created_at) VALUES(?,?,?,?,?,?,?);',
-                                            (pid, sid, row.get('batch_no') or '', int(row.get('quantity') or 0), row.get('expiry_date') or None, float(row.get('cost_price') or 0), now_str()))
-                            cnt += 1
-            messagebox.showinfo('Import', f'Imported approx {cnt} rows.')
-            self._inv_refresh_all()
-        except Exception as e:
-            messagebox.showerror('Import Error', str(e))
-
-    def _export_csv(self, target):
-        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV','*.csv')])
-        if not path: return
-        rows=[]; headers=[]
-        if target == 'products':
-            rows = self.db.query('SELECT name,sku,unit,sale_price,notes FROM products ORDER BY name;'); headers=['name','sku','unit','sale_price','notes']
-        elif target == 'batches':
-            rows = self.db.query('SELECT p.name as product, b.batch_no, b.quantity, b.expiry_date, s.name as supplier FROM batches b LEFT JOIN products p ON p.id=b.product_id LEFT JOIN suppliers s ON s.id=b.supplier_id ORDER BY b.id DESC;'); headers=['product','batch_no','quantity','expiry_date','supplier']
-        elif target == 'suppliers':
-            rows = self.db.query('SELECT name,phone,email,address FROM suppliers ORDER BY name;'); headers=['name','phone','email','address']
-        elif target == 'manufacturers':
-            rows = self.db.query('SELECT name,contact,notes FROM manufacturers ORDER BY name;'); headers=['name','contact','notes']
-        elif target == 'categories':
-            rows = self.db.query('SELECT name,notes FROM categories ORDER BY name;'); headers=['name','notes']
-        elif target == 'formulas':
-            rows = self.db.query('SELECT name,composition FROM formulas ORDER BY name;'); headers=['name','composition']
-        elif target == 'customers':
-            rows = self.db.query('SELECT name,phone,notes FROM customers ORDER BY name;'); headers=['name','phone','notes']
-        with open(path, 'w', newline='', encoding='utf-8') as f:
-            w = csv.writer(f); w.writerow(headers)
-            for r in rows: w.writerow([r.get(h,'') for h in headers])
-        messagebox.showinfo('Export', f'Exported {len(rows)} rows to {path}')
-
-    def _export_xlsx(self, target):
-        if not OPENPYXL_AVAILABLE:
-            return messagebox.showerror('Missing', 'openpyxl required for XLSX export')
-        path = filedialog.asksaveasfilename(defaultextension='.xlsx', filetypes=[('Excel','*.xlsx')])
-        if not path: return
-        rows=[]; headers=[]
-        if target == 'products':
-            rows = self.db.query('SELECT name,sku,unit,sale_price,notes FROM products ORDER BY name;'); headers=['name','sku','unit','sale_price','notes']
-        elif target == 'batches':
-            rows = self.db.query('SELECT p.name as product, b.batch_no, b.quantity, b.expiry_date, s.name as supplier FROM batches b LEFT JOIN products p ON p.id=b.product_id LEFT JOIN suppliers s ON s.id=b.supplier_id ORDER BY b.id DESC;'); headers=['product','batch_no','quantity','expiry_date','supplier']
-        elif target == 'suppliers':
-            rows = self.db.query('SELECT name,phone,email,address FROM suppliers ORDER BY name;'); headers=['name','phone','email','address']
-        elif target == 'manufacturers':
-            rows = self.db.query('SELECT name,contact,notes FROM manufacturers ORDER BY name;'); headers=['name','contact','notes']
-        elif target == 'categories':
-            rows = self.db.query('SELECT name,notes FROM categories ORDER BY name;'); headers=['name','notes']
-        elif target == 'formulas':
-            rows = self.db.query('SELECT name,composition FROM formulas ORDER BY name;'); headers=['name','composition']
-        elif target == 'customers':
-            rows = self.db.query('SELECT name,phone,notes FROM customers ORDER BY name;'); headers=['name','phone','notes']
-        from openpyxl import Workbook
-        wb = Workbook(); ws = wb.active; ws.append(headers)
-        for r in rows: ws.append([r.get(h,'') for h in headers])
-        wb.save(path); messagebox.showinfo('Export', f'Exported {len(rows)} rows to {path}')
-
-    def _backup_now(self):
-        ts = datetime.now().strftime('%Y%m%d%H%M%S')
-        dst = os.path.join(BACKUP_FOLDER, f'pharmacy_backup_{ts}.db')
-        try:
-            with open(DB_PATH, 'rb') as src, open(dst, 'wb') as out:
-                out.write(src.read())
-            messagebox.showinfo('Backup', f'Backup saved to {dst}')
-        except Exception as e:
-            messagebox.showerror('Backup Failed', str(e))
-
-    def _toggle_auto_backup(self):
-        val = int(self.auto_backup_var.get())
-        self.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?);', ('auto_backup_enabled', str(val)))
-        if val:
-            self._schedule_auto_backup()
-        else:
-            if getattr(self, '_auto_job', None):
-                try: self.root.after_cancel(self._auto_job)
-                except: pass
-                self._auto_job = None
-
-    def _schedule_auto_backup(self):
-        self._backup_now()
-        try:
-            self._auto_job = self.root.after(12*3600*1000, self._schedule_auto_backup)
-        except Exception:
-            pass
 
     # ---------------- Settings ----------------
     def _build_settings_tab(self):
@@ -1834,8 +1753,6 @@ class App:
         rows = self.db.query('SELECT name, sale_price FROM products WHERE name LIKE ? ORDER BY name LIMIT 12;', (f'%{term}%',))
         return [r['name'] for r in rows]
 
-    # ---------------- Staff (already implemented above) ----------------
-    
 
     # ---------------- Seeder ----------------
     def _seed_test_data(self):
