@@ -1320,6 +1320,11 @@ class App:
         except Exception:
             pass
 
+  # --- Return Item ---
+        return_item_tab = ttk.Frame(pos_nb)
+        pos_nb.add(return_item_tab, text='Return Item')
+        self._build_return_item_tab(return_item_tab)
+
         # --- Return History ---
         returns_tab = ttk.Frame(pos_nb)
         pos_nb.add(returns_tab, text='Return History')
@@ -1349,69 +1354,109 @@ class App:
             # Simple fallback
             ttk.Label(reports_tab, text="Reports functionality not available").pack(pady=20)
 
-    # def _build_pos_tab(self):
-    #     # Clear POS tab
-    #     for w in self.tab_pos.winfo_children():
-    #         w.destroy()
-    #     pos_nb = ttk.Notebook(self.tab_pos)
-    #     pos_nb.pack(fill='both', expand=True, padx=8, pady=8)
 
-    #     # --- New Sale ---
-    #     new_sale_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(new_sale_tab, text='New Sale')
-    #     NewSaleTab(new_sale_tab, self.db, self.user).pack(fill='both', expand=True)
+    def _build_return_item_tab(self, frame):
+        # --- Search by Sale ID ---
+        search_frame = ttk.Frame(frame)
+        search_frame.pack(fill="x", padx=10, pady=6)
 
-    #     # --- Sale History ---
-    #     history_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(history_tab, text='Sale History')
-    #     self._sale_history_tree = ttk.Treeview(
-    #         history_tab,
-    #         columns=('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'),
-    #         show='headings', height=18
-    #     )
-    #     for c in ('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'):
-    #         self._sale_history_tree.heading(c, text=c.capitalize())
-    #         self._sale_history_tree.column(c, width=120, anchor='w')
-    #     self._sale_history_tree.pack(fill='both', expand=True, padx=8, pady=8)
-    #     btns = ttk.Frame(history_tab)
-    #     btns.pack(fill='x')
-    #     ttk.Button(btns, text='Refresh', command=self._sale_history_refresh).pack(side='left', padx=6)
-    #     ttk.Button(btns, text='Print Receipt (Selected)', command=self._sale_history_print_selected).pack(side='left', padx=6)
-    #     try:
-    #         self._sale_history_refresh()
-    #     except Exception:
-    #         pass
+        ttk.Label(search_frame, text="Sale ID:").pack(side="left")
+        self.return_sale_id = ttk.Entry(search_frame, width=15)
+        self.return_sale_id.pack(side="left", padx=6)
 
-    #     # --- Return History ---
-    #     returns_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(returns_tab, text='Return History')
-    #     self._return_tree = ttk.Treeview(
-    #         returns_tab,
-    #         columns=('id','sale_item','product','qty','reason','created','expiry'),
-    #         show='headings'
-    #     )
-    #     for c in ('id','sale_item','product','qty','reason','created','expiry'):
-    #         self._return_tree.heading(c, text=c.capitalize())
-    #         self._return_tree.column(c, width=120, anchor='w')
-    #     self._return_tree.pack(fill='both', expand=True, padx=8, pady=8)
-    #     ttk.Button(returns_tab, text='Refresh', command=self._return_refresh).pack(anchor='e', padx=8, pady=6)
-    #     try:
-    #         self._return_refresh()
-    #     except Exception:
-    #         pass
+        ttk.Button(search_frame, text="Fetch Sale",
+            command=lambda: self._load_sale_for_return(self.return_sale_id.get())
+        ).pack(side="left")
 
-    #     # --- Sale Reports ---
-    #     reports_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(reports_tab, text='Sale Reports')
-    #     try:
-    #         self._build_reports_tab(reports_tab)
-    #     except Exception as e:
-    #         print(f"Error building modern reports: {e}")
-    #         # Fallback to old method
-    #         try:
-    #             self._build_reports_in_frame(reports_tab)
-    #         except Exception:
-    #             pass
+        # --- Treeview for sale items ---
+        self.return_tree = ttk.Treeview(
+            frame,
+            columns=("id", "product", "qty", "price", "total"),
+            show="headings"
+        )
+        for col in ("id", "product", "qty", "price", "total"):
+            self.return_tree.heading(col, text=col.capitalize())
+            self.return_tree.column(col, width=120, anchor="w")
+        self.return_tree.pack(fill="both", expand=True, padx=10, pady=6)
+
+        # --- Return controls ---
+        control_frame = ttk.Frame(frame)
+        control_frame.pack(fill="x", padx=10, pady=6)
+
+        ttk.Label(control_frame, text="Quantity to Return:").pack(side="left")
+        self.return_qty = ttk.Entry(control_frame, width=10)
+        self.return_qty.pack(side="left", padx=6)
+
+        ttk.Label(control_frame, text="Reason:").pack(side="left")
+        self.return_reason = ttk.Entry(control_frame, width=30)
+        self.return_reason.pack(side="left", padx=6)
+
+        ttk.Button(control_frame, text="Process Return",
+            command=self._process_return
+        ).pack(side="left", padx=6)
+
+    def _load_sale_for_return(self, sale_id):
+        rows = self.db.query("""
+            SELECT si.id, p.name AS product, si.quantity, si.price,
+                (si.quantity * si.price) as total
+            FROM sale_items si
+            JOIN products p ON si.product_id = p.id
+            WHERE si.sale_id = ?;
+        """, (sale_id,))
+        self.return_tree.delete(*self.return_tree.get_children())
+        for r in rows:
+            self.return_tree.insert("", "end", values=(r["id"], r["product"], r["quantity"], r["price"], r["total"]))
+
+    def _process_return(self):
+        selected = self.return_tree.selection()
+        if not selected:
+            messagebox.showerror("Error", "Select an item to return.")
+            return
+
+        item_id, product, qty, price, total = self.return_tree.item(selected[0], "values")
+        return_qty = int(self.return_qty.get() or 0)
+        reason = self.return_reason.get()
+
+        if return_qty <= 0 or return_qty > int(qty):
+            messagebox.showerror("Error", "Invalid return quantity.")
+            return
+
+        # 1. Log the return
+        self.db.execute("""
+            INSERT INTO returns (sale_item_id, quantity, reason)
+            VALUES (?, ?, ?)
+        """, (item_id, return_qty, reason))
+
+        # 2. Restore stock to batches used in this sale
+        batches = self.db.query("""
+            SELECT sib.batch_id, sib.quantity
+            FROM sale_item_batches sib
+            WHERE sib.sale_item_id = ?
+            ORDER BY sib.id ASC;
+        """, (item_id,))
+
+        remain = return_qty
+        for b in batches:
+            if remain <= 0:
+                break
+            give_back = min(remain, b["quantity"])
+            self.db.execute(
+                "UPDATE batches SET quantity = quantity + ? WHERE id = ?;",
+                (give_back, b["batch_id"])
+            )
+            remain -= give_back
+
+        # 3. Update sale_items to reflect reduced sold qty
+        self.db.execute("""
+            UPDATE sale_items
+            SET quantity = quantity - ?
+            WHERE id = ?
+        """, (return_qty, item_id))
+
+        messagebox.showinfo("Success", f"Returned {return_qty} x {product}")
+        # Refresh items for this sale
+        self._load_sale_for_return(self.return_sale_id.get())
+
 
 
     def _build_sale_history_tab(self):
