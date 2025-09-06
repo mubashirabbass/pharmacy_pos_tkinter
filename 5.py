@@ -1,0 +1,1406 @@
+# 3_modified.py
+# Pharmacy Management System - merged & updated (final)
+# Features:
+# - Modern Login (role selection admin/staff/cashier)
+# - Dashboard: colorful bank-style cards (ttkbootstrap), vector icons, 1s count-up animation, clickable
+# - Inventory: nested sub-tabs (Medical, Non-medical, Suppliers, Manufacturers, Categories, Formulas, Batches)
+# - POS: nested sub-tabs (New Sale, Sale History, Return History, Sale Reports)
+# - Autocomplete entries, DateEntry wrapper, matplotlib graph, reportlab receipts, import/export, backups, seeder
+# - Graceful exit, auto-refresh after actions
+
+import os
+import sqlite3
+import hashlib
+import csv
+import threading
+import time
+from datetime import datetime, timedelta
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+
+# Optional libs
+try:
+    import ttkbootstrap as tb
+    from ttkbootstrap.icons import Icon
+    TTB_AVAILABLE = True
+except Exception:
+    tb = None
+    Icon = None
+    TTB_AVAILABLE = False
+
+try:
+    from tkcalendar import DateEntry as _TKDateEntry
+    # wrapper to avoid ttkbootstrap conflicts
+    class DateEntry(_TKDateEntry):
+        def __init__(self, master=None, **kw):
+            if 'bootstyle' in kw: kw.pop('bootstyle')
+            super().__init__(master, **kw)
+    TKCAL_AVAILABLE = True
+except Exception:
+    DateEntry = None
+    TKCAL_AVAILABLE = False
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    MATPLOTLIB_AVAILABLE = True
+except Exception:
+    MATPLOTLIB_AVAILABLE = False
+
+try:
+    import openpyxl
+    OPENPYXL_AVAILABLE = True
+except Exception:
+    OPENPYXL_AVAILABLE = False
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as pdf_canvas
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
+
+# paths and DB
+BASE_DIR = os.path.dirname(__file__)
+DB_PATH = os.path.join(BASE_DIR, 'pharmacy.db')
+BACKUP_FOLDER = os.path.join(BASE_DIR, 'backups')
+os.makedirs(BACKUP_FOLDER, exist_ok=True)
+RECEIPT_FOLDER = os.path.join(BASE_DIR, 'receipts')
+os.makedirs(RECEIPT_FOLDER, exist_ok=True)
+
+
+# -----------------------
+# Utilities & DB Layer
+# -----------------------
+def hash_pw(pw: str) -> str:
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+def now_str(): return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+class DB:
+    def __init__(self, path=DB_PATH):
+        self.path = path
+        self._ensure()
+
+    def connect(self):
+        con = sqlite3.connect(self.path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        con.row_factory = sqlite3.Row
+        con.execute('PRAGMA foreign_keys = ON;')
+        return con
+
+    def _ensure(self):
+        con = self.connect(); cur = con.cursor()
+        # users
+        cur.execute('''CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            role TEXT CHECK(role IN ('admin','staff','cashier')) NOT NULL
+        );''')
+        cur.execute('SELECT COUNT(*) as c FROM users;')
+        if cur.fetchone()['c'] == 0:
+            cur.executemany('INSERT INTO users(username,password_hash,role) VALUES(?,?,?);', [
+                ('admin', hash_pw('admin123'), 'admin'),
+                ('cashier', hash_pw('cashier123'), 'cashier'),
+            ])
+        # customers
+        cur.execute('''CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            phone TEXT UNIQUE,
+            notes TEXT
+        );''')
+        # categories/manufacturers/suppliers/formulas
+        cur.execute('''CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, notes TEXT);''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS manufacturers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, contact TEXT, notes TEXT);''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, phone TEXT, email TEXT, address TEXT);''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS formulas (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, composition TEXT);''')
+        # products & batches
+        cur.execute('''CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            sku TEXT UNIQUE,
+            is_medical INTEGER DEFAULT 1,
+            category_id INTEGER,
+            manufacturer_id INTEGER,
+            formula_id INTEGER,
+            unit TEXT,
+            sale_price REAL DEFAULT 0,
+            notes TEXT
+        );''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            supplier_id INTEGER,
+            batch_no TEXT,
+            quantity INTEGER NOT NULL,
+            expiry_date TEXT,
+            cost_price REAL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+            FOREIGN KEY(supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL
+        );''')
+        # sales & items
+        cur.execute('''CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            total REAL NOT NULL,
+            customer_id INTEGER,
+            customer_name TEXT,
+            customer_phone TEXT,
+            discount REAL DEFAULT 0,
+            tax REAL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL,
+            FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE SET NULL
+        );''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS sale_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            price REAL NOT NULL,
+            FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE CASCADE,
+            FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+        );''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS sale_item_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_item_id INTEGER NOT NULL,
+            batch_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            FOREIGN KEY(sale_item_id) REFERENCES sale_items(id) ON DELETE CASCADE,
+            FOREIGN KEY(batch_id) REFERENCES batches(id) ON DELETE CASCADE
+        );''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS returns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_item_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            reason TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(sale_item_id) REFERENCES sale_items(id) ON DELETE CASCADE
+        );''')
+        # settings
+        cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);''')
+        def set_if_missing(k,v):
+            cur.execute('SELECT value FROM settings WHERE key=?;',(k,))
+            if not cur.fetchone(): cur.execute('INSERT INTO settings(key,value) VALUES(?,?);',(k,str(v)))
+        set_if_missing('tax_percent','0.0')
+        set_if_missing('default_discount','0.0')
+        set_if_missing('auto_backup_enabled','0')
+        con.commit(); con.close()
+
+    def query(self, sql, params=()):
+        with self.connect() as con:
+            cur = con.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+    def execute(self, sql, params=()):
+        with self.connect() as con:
+            cur = con.execute(sql, params)
+            con.commit()
+            return cur.lastrowid
+
+db = DB()
+
+
+# ------------------------
+# Widgets: Autocomplete, FormDialog
+# ------------------------
+class AutocompleteEntry(ttk.Entry):
+    def __init__(self, master, suggestions_getter=None, width=30, **kwargs):
+        super().__init__(master, width=width, **kwargs)
+        self.suggestions_getter = suggestions_getter
+        self.var = tk.StringVar()
+        self.config(textvariable=self.var)
+        self.var.trace_add('write', self._on_change)
+        self.listbox = None
+        self.bind('<Down>', self._focus_listbox)
+        self.bind('<Escape>', lambda e: self._hide())
+        self.bind('<Return>', self._select_first)
+
+    def _on_change(self, *args):
+        term = self.var.get().strip()
+        if not term:
+            self._hide(); return
+        try:
+            suggestions = self.suggestions_getter(term) if self.suggestions_getter else []
+        except Exception:
+            suggestions = []
+        if not suggestions:
+            self._hide(); return
+        if not self.listbox:
+            self.listbox = tk.Listbox(self.master, height=6)
+            self.listbox.bind('<<ListboxSelect>>', self._on_select)
+            self.listbox.bind('<Return>', self._on_select)
+            self.listbox.bind('<Escape>', lambda e: self._hide())
+        self.listbox.delete(0, 'end')
+        for s in suggestions:
+            self.listbox.insert('end', s)
+        x = self.winfo_rootx() - self.master.winfo_rootx()
+        y = self.winfo_rooty() - self.master.winfo_rooty() + self.winfo_height()
+        self.listbox.place(x=x, y=y, width=self.winfo_width())
+
+    def _on_select(self, event=None):
+        if not self.listbox: return
+        sel = self.listbox.curselection()
+        if not sel: return
+        val = self.listbox.get(sel[0])
+        self.var.set(val)
+        self._hide()
+
+    def _focus_listbox(self, event=None):
+        if self.listbox:
+            self.listbox.focus_set()
+            self.listbox.selection_set(0)
+
+    def _hide(self):
+        if self.listbox:
+            self.listbox.destroy()
+            self.listbox = None
+
+    def _select_first(self, event=None):
+        if self.listbox and self.listbox.size() > 0:
+            val = self.listbox.get(0)
+            self.var.set(val)
+            self._hide()
+
+
+class FormDialog(tk.Toplevel):
+    def __init__(self, master, title, fields, initial=None, on_submit=None):
+        super().__init__(master)
+        self.title(title)
+        self.on_submit = on_submit
+        self.result = None
+        pad = 8
+        frm = ttk.Frame(self, padding=pad); frm.pack(fill='both', expand=True)
+        self.widgets = {}
+        for i, f in enumerate(fields):
+            ttk.Label(frm, text=f.get('label', f['key'])).grid(row=i, column=0, sticky='w', pady=4)
+            widget = f.get('widget','entry')
+            if widget == 'entry':
+                w = ttk.Entry(frm)
+                if initial and f['key'] in initial and initial[f['key']] is not None: w.insert(0, str(initial[f['key']]))
+            elif widget == 'combobox':
+                state = f.get('state', 'readonly')
+                values = f.get('values', [])
+                w = ttk.Combobox(frm, values=values, state=state)
+                if initial and f['key'] in initial and initial[f['key']] is not None:
+                    try: w.set(str(initial[f['key']]))
+                    except: pass
+            elif widget == 'spinbox':
+                w = ttk.Spinbox(frm, from_=f.get('from',0), to=f.get('to',999999), increment=f.get('inc',1))
+                if initial and f['key'] in initial and initial[f['key']] is not None: w.set(str(initial[f['key']]))
+            elif widget == 'text':
+                w = tk.Text(frm, height=f.get('height',3), width=40)
+                if initial and f['key'] in initial and initial[f['key']] is not None: w.insert('1.0', str(initial[f['key']]))
+            else:
+                w = ttk.Entry(frm)
+            w.grid(row=i, column=1, sticky='we', pady=4)
+            self.widgets[f['key']] = (w, f)
+        btns = ttk.Frame(frm); btns.grid(row=len(fields), column=0, columnspan=2, pady=(10,0))
+        ttk.Button(btns, text='Save', command=self._save).pack(side='left', padx=6)
+        ttk.Button(btns, text='Cancel', command=self.destroy).pack(side='left')
+        self.bind('<Return>', lambda e: self._save()); self.bind('<Escape>', lambda e: self.destroy())
+
+    def _save(self):
+        data = {}
+        for key, (w, f) in self.widgets.items():
+            widget = f.get('widget','entry')
+            if widget in ('entry','combobox','spinbox'):
+                try: data[key] = w.get().strip()
+                except: data[key] = ''
+            elif widget == 'text':
+                data[key] = w.get('1.0', 'end').strip()
+            else:
+                data[key] = w.get().strip()
+        self.result = data
+        if self.on_submit: self.on_submit(data)
+        self.destroy()
+
+
+# -----------------------
+# Main Application
+# -----------------------
+class App:
+    def __init__(self):
+        if TTB_AVAILABLE:
+            self.root = tb.Window(themename='flatly')
+        else:
+            self.root = tk.Tk()
+        self.root.title('Pharmacy Management System')
+        self.root.geometry('1200x780')
+        # close handler
+        try:
+            self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+        except Exception:
+            pass
+        self.db = db
+        self.user = None
+        self._auto_job = None
+        self._build_login()
+
+    def _on_close(self):
+        try:
+            if getattr(self, '_auto_job', None):
+                try: self.root.after_cancel(self._auto_job)
+                except: pass
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    # ---------------- Login ----------------
+    def _build_login(self):
+        for w in self.root.winfo_children(): w.destroy()
+        frm = ttk.Frame(self.root, padding=20); frm.pack(expand=True)
+        ttk.Label(frm, text='Welcome to Pharmacy System', font=('Segoe UI', 20, 'bold')).grid(row=0, column=0, columnspan=2, pady=(0,12))
+        ttk.Label(frm, text='Role').grid(row=1, column=0, sticky='e')
+        role_cb = ttk.Combobox(frm, values=['admin','staff','cashier'], state='readonly'); role_cb.set('admin'); role_cb.grid(row=1, column=1, sticky='w', pady=4)
+        ttk.Label(frm, text='Username').grid(row=2, column=0, sticky='e')
+        user_e = ttk.Entry(frm); user_e.grid(row=2, column=1, sticky='w', pady=4)
+        ttk.Label(frm, text='Password').grid(row=3, column=0, sticky='e')
+        pw_e = ttk.Entry(frm, show='•'); pw_e.grid(row=3, column=1, sticky='w', pady=4)
+        def try_login():
+            u = user_e.get().strip(); p = pw_e.get().strip(); r = role_cb.get().strip()
+            if not u or not p: return messagebox.showerror('Error','Enter username & password')
+            rows = self.db.query('SELECT * FROM users WHERE username=?;',(u,))
+            if not rows or rows[0]['password_hash'] != hash_pw(p) or rows[0]['role'] != r:
+                return messagebox.showerror('Error','Invalid credentials or role')
+            self.user = {'id':rows[0]['id'],'username':u,'role':rows[0]['role']}
+            self._build_main()
+        ttk.Button(frm, text='Login', command=try_login).grid(row=4, column=0, columnspan=2, pady=8)
+        user_e.focus_set()
+        self.root.bind('<Return>', lambda e: try_login())
+
+    # ---------------- Main ----------------
+    def _build_main(self):
+        for w in self.root.winfo_children(): w.destroy()
+        top = ttk.Frame(self.root); top.pack(fill='x')
+        ttk.Label(top, text=f"Welcome, {self.user['username'].title()}", font=('Segoe UI',14,'bold')).pack(side='left', padx=10, pady=8)
+        ttk.Button(top, text='Profile', command=self._open_profile).pack(side='right', padx=6)
+        ttk.Button(top, text='Logout', command=self._logout).pack(side='right')
+        self.nb = ttk.Notebook(self.root); self.nb.pack(fill='both', expand=True, padx=8, pady=8)
+        # main tabs: Dashboard, Inventory, POS, Sale History (moved under POS), Return History (under POS), Manage Staff, Import/Export, Settings
+        self.tab_dashboard = ttk.Frame(self.nb); self.nb.add(self.tab_dashboard, text='Dashboard')
+        self.tab_inventory = ttk.Frame(self.nb); self.nb.add(self.tab_inventory, text='Inventory')
+        self.tab_pos = ttk.Frame(self.nb); self.nb.add(self.tab_pos, text='POS')
+        if self.user['role'] in ('admin','staff'):
+            self.nb.add(ttk.Frame(self.nb), text='Suppliers/Manufacturers')  # placeholder for alignment
+        if self.user['role'] == 'admin':
+            self.tab_manage_staff = ttk.Frame(self.nb); self.nb.add(self.tab_manage_staff, text='Manage Staff')
+            self.tab_import_export = ttk.Frame(self.nb); self.nb.add(self.tab_import_export, text='Import/Export')
+            self.tab_settings = ttk.Frame(self.nb); self.nb.add(self.tab_settings, text='Settings')
+        # build tabs content
+        self._build_dashboard_tab()
+        self._build_inventory_tab()
+        self._build_pos_tab()
+        self._build_sale_history_tab()
+        self._build_return_history_tab()
+        # seed sample data if empty
+        try:
+            self._seed_test_data()
+        except Exception:
+            pass
+
+    def _logout(self):
+        self.user = None
+        self._build_login()
+
+    def _open_profile(self):
+        def save(d):
+            pw = d.get('new_password','').strip()
+            if pw:
+                self.db.execute('UPDATE users SET password_hash=? WHERE id=?;', (hash_pw(pw), self.user['id']))
+                messagebox.showinfo('Profile','Password updated.')
+        FormDialog(self.root, 'Profile - Change Password', [
+            {'key':'username','label':'Username','widget':'entry'},
+            {'key':'role','label':'Role','widget':'entry'},
+            {'key':'new_password','label':'New Password','widget':'entry'},
+        ], initial={'username':self.user['username'],'role':self.user['role']}, on_submit=save)
+
+    # ---------------- Dashboard ----------------
+    def _build_dashboard_tab(self):
+        for w in self.tab_dashboard.winfo_children(): w.destroy()
+        frame = self.tab_dashboard
+        welcome = ttk.Label(frame, text=f"Welcome back, {self.user['username'].title()}!", font=('Segoe UI',18,'bold'), anchor='center')
+        welcome.pack(pady=10)
+        cards_row = ttk.Frame(frame); cards_row.pack(fill='x', padx=12, pady=6)
+
+        def make_card(parent, title, value, icon_name, bootstyle, onclick):
+            if TTB_AVAILABLE:
+                card = tb.Frame(parent, bootstyle=bootstyle)
+            else:
+                card = ttk.Frame(parent, padding=8, relief='raised')
+            card.pack(side='left', expand=True, fill='both', padx=8, pady=8)
+            if TTB_AVAILABLE and Icon:
+                try:
+                    ic = Icon(icon_name, size=36)
+                    icon_lbl = ttk.Label(card, image=ic)
+                    icon_lbl.image = ic
+                except Exception:
+                    icon_lbl = ttk.Label(card, text='●', font=('Segoe UI', 24))
+            else:
+                icon_lbl = ttk.Label(card, text='●', font=('Segoe UI', 24))
+            icon_lbl.pack(side='left', padx=12, pady=8)
+            txt_fr = ttk.Frame(card); txt_fr.pack(side='left', fill='both', expand=True, padx=6)
+            ttk.Label(txt_fr, text=title, font=('Segoe UI',11,'bold')).pack(anchor='w')
+            val_lbl = ttk.Label(txt_fr, text='0', font=('Segoe UI',20,'bold')); val_lbl.pack(anchor='w', pady=(4,0))
+            def animate_to(target):
+                target = int(target)
+                steps = 25
+                for i in range(1, steps+1):
+                    v = int(target * i / steps)
+                    val_lbl.config(text=str(v))
+                    time.sleep(1.0/steps)
+            threading.Thread(target=lambda: animate_to(value), daemon=True).start()
+            def on_click(e=None):
+                try:
+                    if onclick: onclick()
+                except Exception as ex:
+                    print('card click error', ex)
+            for w in (card, icon_lbl, txt_fr, val_lbl): w.bind('<Button-1>', on_click)
+            return card
+
+        sales_total = self.db.query("SELECT COALESCE(SUM(total),0) AS s FROM sales WHERE strftime('%Y-%m',created_at)=strftime('%Y-%m','now');")[0]['s']
+        low_stock_count = self.db.query("""SELECT COUNT(*) AS c FROM (
+            SELECT p.id, COALESCE(SUM(b.quantity),0) AS stock FROM products p LEFT JOIN batches b ON b.product_id=p.id GROUP BY p.id HAVING stock<=5
+        ) t;""")[0]['c']
+        near_expiry_count = self.db.query("SELECT COUNT(*) AS c FROM batches WHERE expiry_date IS NOT NULL AND julianday(expiry_date)-julianday('now')<=30 AND quantity>0;")[0]['c']
+        staff_count = self.db.query("SELECT COUNT(*) AS c FROM users WHERE role IN ('staff','cashier');")[0]['c']
+
+        make_card(cards_row, 'Sales (This Month)', int(sales_total), 'currency-dollar', 'success', lambda: self._open_tab_by_name('Sale History'))
+        make_card(cards_row, 'Low Stock', int(low_stock_count), 'box-seam', 'danger', lambda: self._open_low_stock())
+        make_card(cards_row, 'Near Expiry (30d)', int(near_expiry_count), 'calendar', 'warning', lambda: self._open_near_expiry())
+        if self.user['role'] == 'admin':
+            make_card(cards_row, 'Staff Count', int(staff_count), 'people-fill', 'info', lambda: self._open_tab_by_name('Manage Staff'))
+
+        if MATPLOTLIB_AVAILABLE:
+            try:
+                fig = Figure(figsize=(8,2.2), dpi=90); ax = fig.add_subplot(111)
+                days = []; totals = []
+                for i in range(6,-1,-1):
+                    d = (datetime.now().date() - timedelta(days=i)).strftime('%Y-%m-%d')
+                    days.append(d[5:])
+                    r = self.db.query('SELECT COALESCE(SUM(total),0) AS s FROM sales WHERE substr(created_at,1,10)=?;', (d,))
+                    totals.append(float(r[0]['s']))
+                ax.plot(days, totals, marker='o'); ax.set_title('Sales — Last 7 days'); ax.grid(True)
+                canvas = FigureCanvasTkAgg(fig, master=frame); canvas.draw(); canvas.get_tk_widget().pack(fill='x', padx=12, pady=10)
+            except Exception as e:
+                print('graph error', e)
+
+    # ---------------- Inventory with nested tabs ----------------
+    def _build_inventory_tab(self):
+        for w in self.tab_inventory.winfo_children(): w.destroy()
+        frame = self.tab_inventory
+        ttk.Label(frame, text='Inventory', font=('Segoe UI',14,'bold')).pack(anchor='w', padx=10, pady=(6,0))
+        inv_nb = ttk.Notebook(frame); inv_nb.pack(fill='both', expand=True, padx=8, pady=8)
+
+        med_tab = ttk.Frame(inv_nb); inv_nb.add(med_tab, text='Medical Products')
+        nonmed_tab = ttk.Frame(inv_nb); inv_nb.add(nonmed_tab, text='Non-Medical Products')
+        suppliers_tab = ttk.Frame(inv_nb); inv_nb.add(suppliers_tab, text='Suppliers')
+        manufacturers_tab = ttk.Frame(inv_nb); inv_nb.add(manufacturers_tab, text='Manufacturers')
+        categories_tab = ttk.Frame(inv_nb); inv_nb.add(categories_tab, text='Categories')
+        formulas_tab = ttk.Frame(inv_nb); inv_nb.add(formulas_tab, text='Formulas')
+        batches_tab = ttk.Frame(inv_nb); inv_nb.add(batches_tab, text='Batches')
+
+        cols = ('id','name','sku','unit','category','manufacturer','price','stock')
+        def make_prod_tree(parent):
+            tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
+            for c in cols:
+                tree.heading(c, text=c.capitalize()); tree.column(c, width=120, anchor='w')
+            tree.pack(fill='both', expand=True, padx=8, pady=8)
+            return tree
+
+        self._med_tree = make_prod_tree(med_tab)
+        btns_med = ttk.Frame(med_tab); btns_med.pack(fill='x', padx=8)
+        ttk.Button(btns_med, text='Add', command=lambda: self._inv_add_product(is_medical=1)).pack(side='left', padx=6)
+        ttk.Button(btns_med, text='Edit', command=lambda: self._inv_edit_product(self._med_tree)).pack(side='left', padx=6)
+        ttk.Button(btns_med, text='Delete', command=lambda: self._inv_delete_product(self._med_tree)).pack(side='left', padx=6)
+        ttk.Button(btns_med, text='Clear Filter', command=self._inv_refresh_all).pack(side='right', padx=6)
+
+        self._nonmed_tree = make_prod_tree(nonmed_tab)
+        btns_non = ttk.Frame(nonmed_tab); btns_non.pack(fill='x', padx=8)
+        ttk.Button(btns_non, text='Add', command=lambda: self._inv_add_product(is_medical=0)).pack(side='left', padx=6)
+        ttk.Button(btns_non, text='Edit', command=lambda: self._inv_edit_product(self._nonmed_tree)).pack(side='left', padx=6)
+        ttk.Button(btns_non, text='Delete', command=lambda: self._inv_delete_product(self._nonmed_tree)).pack(side='left', padx=6)
+        ttk.Button(btns_non, text='Clear Filter', command=self._inv_refresh_all).pack(side='right', padx=6)
+
+        self._sup_tree = ttk.Treeview(suppliers_tab, columns=('id','name','phone','email','address'), show='headings')
+        for c in ('id','name','phone','email','address'): self._sup_tree.heading(c, text=c.capitalize()); self._sup_tree.column(c, width=140, anchor='w')
+        self._sup_tree.pack(fill='both', expand=True, padx=8, pady=8)
+        sup_btns = ttk.Frame(suppliers_tab); sup_btns.pack(fill='x', padx=8)
+        ttk.Button(sup_btns, text='Add', command=self._add_supplier).pack(side='left', padx=6)
+        ttk.Button(sup_btns, text='Edit', command=self._edit_supplier).pack(side='left', padx=6)
+        ttk.Button(sup_btns, text='Delete', command=self._delete_supplier).pack(side='left', padx=6)
+
+        self._man_tree = ttk.Treeview(manufacturers_tab, columns=('id','name','contact','notes'), show='headings')
+        for c in ('id','name','contact','notes'): self._man_tree.heading(c, text=c.capitalize()); self._man_tree.column(c, width=140, anchor='w')
+        self._man_tree.pack(fill='both', expand=True, padx=8, pady=8)
+        man_btns = ttk.Frame(manufacturers_tab); man_btns.pack(fill='x', padx=8)
+        ttk.Button(man_btns, text='Add', command=self._add_manufacturer).pack(side='left', padx=6)
+        ttk.Button(man_btns, text='Edit', command=self._edit_manufacturer).pack(side='left', padx=6)
+        ttk.Button(man_btns, text='Delete', command=self._delete_manufacturer).pack(side='left', padx=6)
+
+        self._cat_tree = ttk.Treeview(categories_tab, columns=('id','name','notes'), show='headings')
+        for c in ('id','name','notes'): self._cat_tree.heading(c, text=c.capitalize()); self._cat_tree.column(c, width=200, anchor='w')
+        self._cat_tree.pack(fill='both', expand=True, padx=8, pady=8)
+        cat_btns = ttk.Frame(categories_tab); cat_btns.pack(fill='x', padx=8)
+        ttk.Button(cat_btns, text='Add', command=self._add_category).pack(side='left', padx=6)
+        ttk.Button(cat_btns, text='Edit', command=self._edit_category).pack(side='left', padx=6)
+        ttk.Button(cat_btns, text='Delete', command=self._delete_category).pack(side='left', padx=6)
+
+        self._form_tree = ttk.Treeview(formulas_tab, columns=('id','name','composition'), show='headings')
+        for c in ('id','name','composition'): self._form_tree.heading(c, text=c.capitalize()); self._form_tree.column(c, width=200, anchor='w')
+        self._form_tree.pack(fill='both', expand=True, padx=8, pady=8)
+        form_btns = ttk.Frame(formulas_tab); form_btns.pack(fill='x', padx=8)
+        ttk.Button(form_btns, text='Add', command=self._add_formula).pack(side='left', padx=6)
+        ttk.Button(form_btns, text='Edit', command=self._edit_formula).pack(side='left', padx=6)
+        ttk.Button(form_btns, text='Delete', command=self._delete_formula).pack(side='left', padx=6)
+
+        self._batch_tree = ttk.Treeview(batches_tab, columns=('id','product','batch_no','quantity','expiry','supplier'), show='headings')
+        for c in ('id','product','batch_no','quantity','expiry','supplier'): self._batch_tree.heading(c, text=c.capitalize()); self._batch_tree.column(c, width=140, anchor='w')
+        self._batch_tree.pack(fill='both', expand=True, padx=8, pady=8)
+        batch_btns = ttk.Frame(batches_tab); batch_btns.pack(fill='x', padx=8)
+        ttk.Button(batch_btns, text='Add', command=self._add_batch).pack(side='left', padx=6)
+        ttk.Button(batch_btns, text='Edit', command=self._edit_batch).pack(side='left', padx=6)
+        ttk.Button(batch_btns, text='Delete', command=self._delete_batch).pack(side='left', padx=6)
+        ttk.Button(batch_btns, text='Clear Filter', command=self._inv_refresh_all).pack(side='right', padx=6)
+
+        self._inv_refresh_all()
+
+    def _inv_refresh_all(self):
+        med_rows = self.db.query('''SELECT p.id,p.name,p.sku,p.unit,c.name as category,m.name as manufacturer,p.sale_price as price,
+            COALESCE((SELECT SUM(quantity) FROM batches b WHERE b.product_id=p.id),0) AS stock FROM products p
+            LEFT JOIN categories c ON p.category_id=c.id LEFT JOIN manufacturers m ON p.manufacturer_id=m.id WHERE p.is_medical=1 ORDER BY p.name;''')
+        self._med_tree.delete(*self._med_tree.get_children())
+        for r in med_rows: self._med_tree.insert('', 'end', iid=r['id'], values=(r['id'], r['name'], r['sku'] or '', r.get('unit','') or '', r.get('category') or '', r.get('manufacturer') or '', f"{r['price']:.2f}", r['stock']))
+
+        non_rows = self.db.query('''SELECT p.id,p.name,p.sku,p.unit,c.name as category,m.name as manufacturer,p.sale_price as price,
+            COALESCE((SELECT SUM(quantity) FROM batches b WHERE b.product_id=p.id),0) AS stock FROM products p
+            LEFT JOIN categories c ON p.category_id=c.id LEFT JOIN manufacturers m ON p.manufacturer_id=m.id WHERE p.is_medical=0 ORDER BY p.name;''')
+        self._nonmed_tree.delete(*self._nonmed_tree.get_children())
+        for r in non_rows: self._nonmed_tree.insert('', 'end', iid=r['id'], values=(r['id'], r['name'], r['sku'] or '', r.get('unit','') or '', r.get('category') or '', r.get('manufacturer') or '', f"{r['price']:.2f}", r['stock']))
+
+        self._sup_tree.delete(*self._sup_tree.get_children())
+        for r in self.db.query('SELECT id,name,phone,email,address FROM suppliers ORDER BY name;'): self._sup_tree.insert('', 'end', values=(r['id'],r['name'],r['phone'] or '', r['email'] or '', r['address'] or ''))
+
+        self._man_tree.delete(*self._man_tree.get_children())
+        for r in self.db.query('SELECT id,name,contact,notes FROM manufacturers ORDER BY name;'): self._man_tree.insert('', 'end', values=(r['id'],r['name'],r['contact'] or '', r['notes'] or ''))
+
+        self._cat_tree.delete(*self._cat_tree.get_children())
+        for r in self.db.query('SELECT id,name,notes FROM categories ORDER BY name;'): self._cat_tree.insert('', 'end', values=(r['id'],r['name'],r['notes'] or ''))
+
+        self._form_tree.delete(*self._form_tree.get_children())
+        for r in self.db.query('SELECT id,name,composition FROM formulas ORDER BY name;'): self._form_tree.insert('', 'end', values=(r['id'],r['name'],r['composition'] or ''))
+
+        self._batch_tree.delete(*self._batch_tree.get_children())
+        rows = self.db.query('SELECT b.id, p.name as product, b.batch_no, b.quantity, b.expiry_date, s.name as supplier FROM batches b LEFT JOIN products p ON p.id=b.product_id LEFT JOIN suppliers s ON s.id=b.supplier_id ORDER BY b.id DESC;')
+        for r in rows: self._batch_tree.insert('', 'end', values=(r['id'], r['product'], r['batch_no'] or '', r['quantity'], r['expiry_date'] or '', r['supplier'] or ''))
+
+    def _inv_add_product(self, is_medical=1):
+        cats = [r['name'] for r in self.db.query('SELECT name FROM categories ORDER BY name;')]
+        mans = [r['name'] for r in self.db.query('SELECT name FROM manufacturers ORDER BY name;')]
+        forms = [r['name'] for r in self.db.query('SELECT name FROM formulas ORDER BY name;')]
+        units = ['mg','ml','g','IU','tablet','capsule','bottle','strip','box']
+        def save(d):
+            if not d.get('name'): return messagebox.showerror('Error','Name required')
+            cid = mid = fid = None
+            if d.get('category'):
+                row = self.db.query('SELECT id FROM categories WHERE name=?;',(d['category'],))
+                if row: cid = row[0]['id']
+                else: cid = self.db.execute('INSERT INTO categories(name) VALUES(?);',(d['category'],))
+            if d.get('manufacturer'):
+                row = self.db.query('SELECT id FROM manufacturers WHERE name=?;',(d['manufacturer'],))
+                if row: mid = row[0]['id']
+                else: mid = self.db.execute('INSERT INTO manufacturers(name) VALUES(?);',(d['manufacturer'],))
+            if d.get('formula'):
+                row = self.db.query('SELECT id FROM formulas WHERE name=?;',(d['formula'],))
+                if row: fid = row[0]['id']
+                else: fid = self.db.execute('INSERT INTO formulas(name) VALUES(?);',(d['formula'],))
+            try:
+                self.db.execute('INSERT INTO products(name,sku,is_medical,category_id,manufacturer_id,formula_id,unit,sale_price,notes) VALUES(?,?,?,?,?,?,?,?,?);',
+                                (d.get('name'), d.get('sku') or None, 1 if is_medical else 0, cid, mid, fid, d.get('unit') or '', float(d.get('price') or 0), d.get('notes') or ''))
+                messagebox.showinfo('Saved','Product added'); self._inv_refresh_all()
+            except Exception as e:
+                messagebox.showerror('Error', str(e))
+        fields = [
+            {'key':'name','label':'Name'},
+            {'key':'sku','label':'SKU'},
+            {'key':'unit','label':'Unit','widget':'combobox','values':units,'state':'normal'},
+            {'key':'category','label':'Category','widget':'combobox','values':cats,'state':'normal'},
+            {'key':'manufacturer','label':'Manufacturer','widget':'combobox','values':mans,'state':'normal'},
+            {'key':'formula','label':'Formula','widget':'combobox','values':forms,'state':'normal'},
+            {'key':'price','label':'Sale Price'},
+            {'key':'notes','label':'Notes','widget':'text'}
+        ]
+        FormDialog(self.root, 'Add Product', fields, on_submit=save)
+
+    def _inv_edit_product(self, tree):
+        sel = tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select a product to edit')
+        pid = int(sel[0])
+        row = self.db.query('SELECT p.*, c.name as category_name, m.name as manufacturer_name, f.name as formula_name FROM products p LEFT JOIN categories c ON p.category_id=c.id LEFT JOIN manufacturers m ON p.manufacturer_id=m.id LEFT JOIN formulas f ON p.formula_id=f.id WHERE p.id=?;',(pid,))
+        if not row: return messagebox.showerror('Error','Not found')
+        row = row[0]
+        initial = {'name':row['name'],'sku':row['sku'] or '','unit':row['unit'] or '','category':row.get('category_name') or '','manufacturer':row.get('manufacturer_name') or '','formula':row.get('formula_name') or '','price':row['sale_price'],'notes':row['notes']}
+        cats = [r['name'] for r in self.db.query('SELECT name FROM categories ORDER BY name;')]
+        mans = [r['name'] for r in self.db.query('SELECT name FROM manufacturers ORDER BY name;')]
+        forms = [r['name'] for r in self.db.query('SELECT name FROM formulas ORDER BY name;')]
+        units = ['mg','ml','g','IU','tablet','capsule','bottle','strip','box']
+        def save(d):
+            cid = mid = fid = None
+            if d.get('category'):
+                r = self.db.query('SELECT id FROM categories WHERE name=?;',(d['category'],))
+                if r: cid = r[0]['id']
+                else: cid = self.db.execute('INSERT INTO categories(name) VALUES(?);',(d['category'],))
+            if d.get('manufacturer'):
+                r = self.db.query('SELECT id FROM manufacturers WHERE name=?;',(d['manufacturer'],))
+                if r: mid = r[0]['id']
+                else: mid = self.db.execute('INSERT INTO manufacturers(name) VALUES(?);',(d['manufacturer'],))
+            if d.get('formula'):
+                r = self.db.query('SELECT id FROM formulas WHERE name=?;',(d['formula'],))
+                if r: fid = r[0]['id']
+                else: fid = self.db.execute('INSERT INTO formulas(name) VALUES(?);',(d['formula'],))
+            try:
+                self.db.execute('UPDATE products SET name=?,sku=?,category_id=?,manufacturer_id=?,formula_id=?,unit=?,sale_price=?,notes=? WHERE id=?;',
+                                (d.get('name'), d.get('sku') or None, cid, mid, fid, d.get('unit') or '', float(d.get('price') or 0), d.get('notes') or '', pid))
+                messagebox.showinfo('Saved','Product updated'); self._inv_refresh_all()
+            except Exception as e:
+                messagebox.showerror('Error', str(e))
+        fields = [
+            {'key':'name','label':'Name'},{'key':'sku','label':'SKU'},{'key':'unit','label':'Unit','widget':'combobox','values':units,'state':'normal'},
+            {'key':'category','label':'Category','widget':'combobox','values':cats,'state':'normal'},{'key':'manufacturer','label':'Manufacturer','widget':'combobox','values':mans,'state':'normal'},
+            {'key':'formula','label':'Formula','widget':'combobox','values':forms,'state':'normal'},{'key':'price','label':'Sale Price'},{'key':'notes','label':'Notes','widget':'text'}
+        ]
+        FormDialog(self.root, 'Edit Product', fields, initial=initial, on_submit=save)
+
+    def _inv_delete_product(self, tree):
+        sel = tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select a product to delete')
+        pid = int(sel[0])
+        if not messagebox.askyesno('Confirm','Delete selected product?'): return
+        try:
+            self.db.execute('DELETE FROM products WHERE id=?;',(pid,))
+            messagebox.showinfo('Deleted','Product deleted'); self._inv_refresh_all()
+        except Exception as e:
+            messagebox.showerror('Error', str(e))
+
+    # Suppliers CRUD
+    def _add_supplier(self):
+        def save(d):
+            if not d.get('name'): return messagebox.showerror('Error','Name required')
+            try:
+                self.db.execute('INSERT INTO suppliers(name,phone,email,address) VALUES(?,?,?,?);',(d.get('name'), d.get('phone'), d.get('email'), d.get('address')))
+                messagebox.showinfo('Saved','Supplier added'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        FormDialog(self.root, 'Add Supplier', [{'key':'name','label':'Name'},{'key':'phone','label':'Phone'},{'key':'email','label':'Email'},{'key':'address','label':'Address'}], on_submit=save)
+
+    def _edit_supplier(self):
+        sel = self._sup_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select supplier to edit')
+        sid = int(sel[0]); r = self.db.query('SELECT * FROM suppliers WHERE id=?;',(sid,))[0]
+        initial = {'name':r['name'],'phone':r['phone'],'email':r['email'],'address':r['address']}
+        def save(d):
+            try:
+                self.db.execute('UPDATE suppliers SET name=?,phone=?,email=?,address=? WHERE id=?;',(d.get('name'),d.get('phone'),d.get('email'),d.get('address'),sid))
+                messagebox.showinfo('Saved','Supplier updated'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        FormDialog(self.root, 'Edit Supplier', [{'key':'name','label':'Name'},{'key':'phone','label':'Phone'},{'key':'email','label':'Email'},{'key':'address','label':'Address'}], initial=initial, on_submit=save)
+
+    def _delete_supplier(self):
+        sel = self._sup_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select supplier to delete')
+        sid = int(sel[0])
+        if not messagebox.askyesno('Confirm','Delete supplier?'): return
+        try:
+            self.db.execute('DELETE FROM suppliers WHERE id=?;',(sid,)); messagebox.showinfo('Deleted','Supplier deleted'); self._inv_refresh_all()
+        except Exception as e: messagebox.showerror('Error',str(e))
+
+    # Manufacturers CRUD
+    def _add_manufacturer(self):
+        def save(d):
+            if not d.get('name'): return messagebox.showerror('Error','Name required')
+            try:
+                self.db.execute('INSERT INTO manufacturers(name,contact,notes) VALUES(?,?,?);',(d.get('name'),d.get('contact'),d.get('notes')))
+                messagebox.showinfo('Saved','Manufacturer added'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        FormDialog(self.root, 'Add Manufacturer', [{'key':'name','label':'Name'},{'key':'contact','label':'Contact'},{'key':'notes','label':'Notes','widget':'text'}], on_submit=save)
+
+    def _edit_manufacturer(self):
+        sel = self._man_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select manufacturer to edit')
+        mid = int(sel[0]); r = self.db.query('SELECT * FROM manufacturers WHERE id=?;',(mid,))[0]
+        initial = {'name':r['name'],'contact':r['contact'],'notes':r['notes']}
+        def save(d):
+            try:
+                self.db.execute('UPDATE manufacturers SET name=?,contact=?,notes=? WHERE id=?;',(d.get('name'),d.get('contact'),d.get('notes'),mid))
+                messagebox.showinfo('Saved','Manufacturer updated'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        FormDialog(self.root, 'Edit Manufacturer', [{'key':'name','label':'Name'},{'key':'contact','label':'Contact'},{'key':'notes','label':'Notes','widget':'text'}], initial=initial, on_submit=save)
+
+    def _delete_manufacturer(self):
+        sel = self._man_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select manufacturer to delete')
+        mid = int(sel[0])
+        if not messagebox.askyesno('Confirm','Delete manufacturer?'): return
+        try:
+            self.db.execute('DELETE FROM manufacturers WHERE id=?;',(mid,)); messagebox.showinfo('Deleted','Manufacturer deleted'); self._inv_refresh_all()
+        except Exception as e: messagebox.showerror('Error',str(e))
+
+    # Categories CRUD
+    def _add_category(self):
+        def save(d):
+            if not d.get('name'): return messagebox.showerror('Error','Name required')
+            try:
+                self.db.execute('INSERT INTO categories(name,notes) VALUES(?,?);',(d.get('name'), d.get('notes'))); messagebox.showinfo('Saved','Category added'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        FormDialog(self.root, 'Add Category', [{'key':'name','label':'Name'},{'key':'notes','label':'Notes','widget':'text'}], on_submit=save)
+
+    def _edit_category(self):
+        sel = self._cat_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select category to edit')
+        cid = int(sel[0]); r = self.db.query('SELECT * FROM categories WHERE id=?;',(cid,))[0]
+        initial = {'name':r['name'],'notes':r['notes']}
+        def save(d):
+            try:
+                self.db.execute('UPDATE categories SET name=?,notes=? WHERE id=?;',(d.get('name'),d.get('notes'),cid)); messagebox.showinfo('Saved','Category updated'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        FormDialog(self.root, 'Edit Category', [{'key':'name','label':'Name'},{'key':'notes','label':'Notes','widget':'text'}], initial=initial, on_submit=save)
+
+    def _delete_category(self):
+        sel = self._cat_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select category to delete')
+        cid = int(sel[0])
+        if not messagebox.askyesno('Confirm','Delete category?'): return
+        try:
+            self.db.execute('DELETE FROM categories WHERE id=?;',(cid,)); messagebox.showinfo('Deleted','Category deleted'); self._inv_refresh_all()
+        except Exception as e: messagebox.showerror('Error',str(e))
+
+    # Formulas CRUD
+    def _add_formula(self):
+        def save(d):
+            if not d.get('name'): return messagebox.showerror('Error','Name required')
+            try:
+                self.db.execute('INSERT INTO formulas(name,composition) VALUES(?,?);',(d.get('name'),d.get('composition'))); messagebox.showinfo('Saved','Formula added'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        FormDialog(self.root, 'Add Formula', [{'key':'name','label':'Name'},{'key':'composition','label':'Composition','widget':'text'}], on_submit=save)
+
+    def _edit_formula(self):
+        sel = self._form_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select formula to edit')
+        fid = int(sel[0]); r = self.db.query('SELECT * FROM formulas WHERE id=?;',(fid,))[0]
+        initial = {'name':r['name'],'composition':r['composition']}
+        def save(d):
+            try:
+                self.db.execute('UPDATE formulas SET name=?,composition=? WHERE id=?;',(d.get('name'),d.get('composition'),fid)); messagebox.showinfo('Saved','Formula updated'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        FormDialog(self.root, 'Edit Formula', [{'key':'name','label':'Name'},{'key':'composition','label':'Composition','widget':'text'}], initial=initial, on_submit=save)
+
+    def _delete_formula(self):
+        sel = self._form_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select formula to delete')
+        fid = int(sel[0])
+        if not messagebox.askyesno('Confirm','Delete formula?'): return
+        try:
+            self.db.execute('DELETE FROM formulas WHERE id=?;',(fid,)); messagebox.showinfo('Deleted','Formula deleted'); self._inv_refresh_all()
+        except Exception as e: messagebox.showerror('Error',str(e))
+
+    # Batches CRUD
+    def _add_batch(self):
+        products = [r['name'] for r in self.db.query('SELECT name FROM products ORDER BY name;')]
+        suppliers = [r['name'] for r in self.db.query('SELECT name FROM suppliers ORDER BY name;')]
+        def save(d):
+            pid = None; sid = None
+            p = self.db.query('SELECT id FROM products WHERE name=?;',(d.get('product'),))
+            if p: pid = p[0]['id']
+            if d.get('supplier'):
+                s = self.db.query('SELECT id FROM suppliers WHERE name=?;',(d.get('supplier'),))
+                if s: sid = s[0]['id']
+            if not pid: return messagebox.showerror('Error','Product required and must exist')
+            try:
+                self.db.execute('INSERT INTO batches(product_id,supplier_id,batch_no,quantity,expiry_date,cost_price,created_at) VALUES(?,?,?,?,?,?,?);',
+                                (pid, sid, d.get('batch_no') or '', int(d.get('quantity') or 0), d.get('expiry') or None, float(d.get('cost_price') or 0), now_str()))
+                messagebox.showinfo('Saved','Batch added'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        fields = [
+            {'key':'product','label':'Product','widget':'combobox','values':products,'state':'normal'},
+            {'key':'supplier','label':'Supplier','widget':'combobox','values':suppliers,'state':'normal'},
+            {'key':'batch_no','label':'Batch No'},
+            {'key':'quantity','label':'Quantity'},
+            {'key':'expiry','label':'Expiry (YYYY-MM-DD)'},
+            {'key':'cost_price','label':'Cost Price'}
+        ]
+        FormDialog(self.root, 'Add Batch', fields, on_submit=save)
+
+    def _edit_batch(self):
+        sel = self._batch_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select batch to edit')
+        bid = int(sel[0]); r = self.db.query('SELECT * FROM batches WHERE id=?;',(bid,))[0]
+        prodname = self.db.query('SELECT name FROM products WHERE id=?;',(r['product_id'],))[0]['name']
+        supname = None
+        if r['supplier_id']:
+            s = self.db.query('SELECT name FROM suppliers WHERE id=?;',(r['supplier_id'],))
+            supname = s[0]['name'] if s else None
+        initial = {'product':prodname,'supplier':supname,'batch_no':r['batch_no'],'quantity':r['quantity'],'expiry':r['expiry_date'],'cost_price':r['cost_price']}
+        products = [r['name'] for r in self.db.query('SELECT name FROM products ORDER BY name;')]
+        suppliers = [r['name'] for r in self.db.query('SELECT name FROM suppliers ORDER BY name;')]
+        def save(d):
+            p = self.db.query('SELECT id FROM products WHERE name=?;',(d.get('product'),))
+            if not p: return messagebox.showerror('Error','Product required and must exist')
+            pid = p[0]['id']
+            sid = None
+            if d.get('supplier'):
+                s = self.db.query('SELECT id FROM suppliers WHERE name=?;',(d.get('supplier'),))
+                if s: sid = s[0]['id']
+            try:
+                self.db.execute('UPDATE batches SET product_id=?,supplier_id=?,batch_no=?,quantity=?,expiry_date=?,cost_price=? WHERE id=?;',
+                                (pid, sid, d.get('batch_no') or '', int(d.get('quantity') or 0), d.get('expiry') or None, float(d.get('cost_price') or 0), bid))
+                messagebox.showinfo('Saved','Batch updated'); self._inv_refresh_all()
+            except Exception as e: messagebox.showerror('Error',str(e))
+        fields = [
+            {'key':'product','label':'Product','widget':'combobox','values':products,'state':'normal'},
+            {'key':'supplier','label':'Supplier','widget':'combobox','values':suppliers,'state':'normal'},
+            {'key':'batch_no','label':'Batch No'},{'key':'quantity','label':'Quantity'},{'key':'expiry','label':'Expiry (YYYY-MM-DD)'},{'key':'cost_price','label':'Cost Price'}
+        ]
+        FormDialog(self.root, 'Edit Batch', fields, initial=initial, on_submit=save)
+
+    def _delete_batch(self):
+        sel = self._batch_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select batch to delete')
+        bid = int(sel[0])
+        if not messagebox.askyesno('Confirm','Delete batch?'): return
+        try:
+            self.db.execute('DELETE FROM batches WHERE id=?;',(bid,)); messagebox.showinfo('Deleted','Batch deleted'); self._inv_refresh_all()
+        except Exception as e: messagebox.showerror('Error',str(e))
+
+    # ---------------- POS with nested tabs ----------------
+    def _build_pos_tab(self):
+        for w in self.tab_pos.winfo_children(): w.destroy()
+        frame = self.tab_pos
+        pos_nb = ttk.Notebook(frame); pos_nb.pack(fill='both', expand=True, padx=8, pady=8)
+        new_sale_tab = ttk.Frame(pos_nb); pos_nb.add(new_sale_tab, text='New Sale')
+        history_tab = ttk.Frame(pos_nb); pos_nb.add(history_tab, text='Sale History')
+        returns_tab = ttk.Frame(pos_nb); pos_nb.add(returns_tab, text='Return History')
+        reports_tab = ttk.Frame(pos_nb); pos_nb.add(reports_tab, text='Sale Reports')
+
+        # --- New Sale ---
+        top = ttk.Frame(new_sale_tab); top.pack(fill='x', padx=8, pady=6)
+        ttk.Label(top, text='Customer Name').pack(side='left'); cust_e = ttk.Entry(top, width=20); cust_e.pack(side='left', padx=6)
+        ttk.Label(top, text='Mobile').pack(side='left'); phone_e = ttk.Entry(top, width=14); phone_e.pack(side='left', padx=6)
+        ttk.Label(top, text='Product').pack(side='left', padx=(8,0))
+        prod_entry = AutocompleteEntry(top, suggestions_getter=self._product_suggestions, width=40); prod_entry.pack(side='left', padx=6)
+        ttk.Label(top, text='Qty').pack(side='left', padx=(8,0)); qty_e = ttk.Entry(top, width=6); qty_e.pack(side='left', padx=6)
+        ttk.Button(top, text='Add', command=lambda: add_to_cart()).pack(side='left', padx=6)
+
+        cols = ('product','unit','qty','price','expiry','subtotal')
+        cart_tree = ttk.Treeview(new_sale_tab, columns=cols, show='headings', height=14)
+        for c in cols: cart_tree.heading(c, text=c.capitalize()); cart_tree.column(c, width=120, anchor='w')
+        cart_tree.pack(fill='both', expand=True, padx=8, pady=8)
+        total_lbl = ttk.Label(new_sale_tab, text='Total: 0.00', font=('Segoe UI',12,'bold')); total_lbl.pack(anchor='e', padx=12)
+        cart = []
+        def refresh_cart():
+            cart_tree.delete(*cart_tree.get_children())
+            total = 0.0
+            for it in cart:
+                cart_tree.insert('', 'end', values=(it['name'], it.get('unit',''), it['qty'], f"{it['price']:.2f}", it.get('expiry',''), f"{it['subtotal']:.2f}"))
+                total += it['subtotal']
+            total_lbl.config(text=f'Total: {total:.2f}')
+        def add_to_cart():
+            pname = prod_entry.get().strip()
+            try: qty = int(qty_e.get().strip())
+            except: qty = 0
+            if not pname or qty <= 0: return messagebox.showwarning('Input','Enter product and qty>0')
+            rows = self.db.query('SELECT * FROM products WHERE name=? LIMIT 1;',(pname,))
+            if not rows: return messagebox.showwarning('Not found','Product not found. Use autocomplete.')
+            p = rows[0]
+            batches = self.db.query('SELECT id,quantity,expiry_date FROM batches WHERE product_id=? AND quantity>0 ORDER BY expiry_date ASC NULLS LAST, created_at ASC;',(p['id'],))
+            expiry = batches[0]['expiry_date'] if batches else ''
+            cart.append({'id':p['id'],'name':p['name'],'unit':p.get('unit',''),'qty':qty,'price':p['sale_price'],'subtotal':p['sale_price']*qty,'expiry':expiry})
+            prod_entry.delete(0,'end'); qty_e.delete(0,'end'); refresh_cart()
+        def checkout():
+            if not cart: return messagebox.showwarning('Empty','Cart is empty')
+            shortages = []
+            for it in cart:
+                total_stock = self.db.query('SELECT COALESCE(SUM(quantity),0) AS s FROM batches WHERE product_id=?;',(it['id'],))[0]['s']
+                if total_stock < it['qty']:
+                    shortages.append((it['name'], total_stock, it['qty']))
+            if shortages:
+                msg = "Cannot complete sale. Out of stock for:\n"
+                for s in shortages: msg += f"- {s[0]} (available {s[1]}, requested {s[2]})\n"
+                return messagebox.showerror('Out of stock', msg)
+            cname = cust_e.get().strip(); cphone = phone_e.get().strip(); cust_id = None
+            if cphone:
+                existing = self.db.query('SELECT id FROM customers WHERE phone=?;',(cphone,))
+                if existing: cust_id = existing[0]['id']
+                else: cust_id = self.db.execute('INSERT INTO customers(name,phone) VALUES(?,?);',(cname or 'Guest', cphone))
+            total = sum(it['subtotal'] for it in cart); tax_percent = float(self.db.query('SELECT value FROM settings WHERE key="tax_percent";')[0]['value'] or 0); disc_percent = float(self.db.query('SELECT value FROM settings WHERE key="default_discount";')[0]['value'] or 0)
+            tax_val = total * tax_percent/100.0; disc_val = total * disc_percent/100.0
+            sale_id = self.db.execute('INSERT INTO sales(user_id,total,customer_id,customer_name,customer_phone,discount,tax,created_at) VALUES(?,?,?,?,?,?,?,?);', (self.user['id'], total, cust_id, cname, cphone, disc_val, tax_val, now_str()))
+            for it in cart:
+                si = self.db.execute('INSERT INTO sale_items(sale_id,product_id,quantity,price) VALUES(?,?,?,?);',(sale_id, it['id'], it['qty'], it['price']))
+                qty_needed = it['qty']
+                batches = self.db.query('SELECT id,quantity FROM batches WHERE product_id=? AND quantity>0 ORDER BY created_at ASC;',(it['id'],))
+                for b in batches:
+                    if qty_needed <= 0: break
+                    take = min(qty_needed, b['quantity'])
+                    self.db.execute('UPDATE batches SET quantity=quantity-? WHERE id=?;',(take, b['id']))
+                    self.db.execute('INSERT INTO sale_item_batches(sale_item_id,batch_id,quantity) VALUES(?,?,?);',(si,b['id'],take))
+                    qty_needed -= take
+            if REPORTLAB_AVAILABLE and messagebox.askyesno('Receipt','Print receipt now?'): self._print_receipt(sale_id)
+            messagebox.showinfo('Sale','Sale completed'); cart.clear(); refresh_cart(); self._inv_refresh_all(); self._sale_history_refresh()
+
+        ttk.Button(new_sale_tab, text='Checkout', command=checkout).pack(anchor='e', padx=10, pady=6)
+
+        # --- Sale History (sub-tab) ---
+        self._sale_history_tree = ttk.Treeview(history_tab, columns=('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'), show='headings', height=18)
+        for c in ('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'): self._sale_history_tree.heading(c, text=c.capitalize()); self._sale_history_tree.column(c,width=120,anchor='w')
+        self._sale_history_tree.pack(fill='both', expand=True, padx=8, pady=8)
+        btns = ttk.Frame(history_tab); btns.pack(fill='x'); ttk.Button(btns, text='Refresh', command=self._sale_history_refresh).pack(side='left', padx=6); ttk.Button(btns, text='Print Receipt (Selected)', command=self._sale_history_print_selected).pack(side='left', padx=6)
+        self._sale_history_refresh()
+
+        # --- Return History (sub-tab) ---
+        self._return_tree = ttk.Treeview(returns_tab, columns=('id','sale_item','product','qty','reason','created','expiry'), show='headings')
+        for c in ('id','sale_item','product','qty','reason','created','expiry'): self._return_tree.heading(c, text=c.capitalize()); self._return_tree.column(c,width=120,anchor='w')
+        self._return_tree.pack(fill='both', expand=True, padx=8, pady=8)
+        ttk.Button(returns_tab, text='Refresh', command=self._return_refresh).pack(anchor='e', padx=8, pady=6)
+        self._return_refresh()
+
+        # --- Reports inside POS ---
+        try:
+            self._build_reports_in_frame(reports_tab)
+        except Exception:
+            try: self._build_reports_tab()
+            except: pass
+
+    # ---------------- Sale History (global helper) ----------------
+    def _build_sale_history_tab(self):
+        # kept for backward compatibility (not used as top-level)
+        pass
+
+    def _sale_history_refresh(self):
+        tree = getattr(self, '_sale_history_tree', None)
+        if not tree: return
+        tree.delete(*tree.get_children())
+        rows = self.db.query('''SELECT s.id AS sale_id, s.created_at AS date, s.customer_name AS customer,
+            p.name AS product, sib.quantity AS qty, si.price AS price, b.expiry_date AS expiry,
+            sup.name AS supplier, m.name AS manufacturer, (sib.quantity*si.price) AS subtotal
+            FROM sales s
+            JOIN sale_items si ON si.sale_id=s.id
+            JOIN sale_item_batches sib ON sib.sale_item_id=si.id
+            JOIN batches b ON b.id=sib.batch_id
+            JOIN products p ON p.id=si.product_id
+            LEFT JOIN suppliers sup ON sup.id=b.supplier_id
+            LEFT JOIN manufacturers m ON m.id=p.manufacturer_id
+            ORDER BY s.created_at DESC LIMIT 200;''')
+        for r in rows:
+            tree.insert('', 'end', values=(r['sale_id'], r['date'], r['customer'] or '', r['product'], r['qty'], f"{r['price']:.2f}", r['expiry'] or '', r['supplier'] or '', r['manufacturer'] or '', f"{r['subtotal']:.2f}"))
+
+    def _sale_history_print_selected(self):
+        sel = self._sale_history_tree.selection()
+        if not sel: return messagebox.showwarning('Select','Select a row (sale item) to print its sale receipt')
+        item = self._sale_history_tree.item(sel[0])['values']
+        sale_id = item[0]
+        if REPORTLAB_AVAILABLE:
+            self._print_receipt(sale_id)
+        else:
+            messagebox.showwarning('Missing','reportlab required for PDF receipt')
+
+    def _print_receipt(self, sale_id):
+        if not REPORTLAB_AVAILABLE:
+            return messagebox.showerror('Missing','reportlab is required to generate PDF receipts')
+        items = self.db.query('SELECT si.quantity,si.price,p.name FROM sale_items si JOIN products p ON si.product_id=p.id WHERE si.sale_id=?;', (sale_id,))
+        sale = self.db.query('SELECT * FROM sales WHERE id=?;', (sale_id,))
+        if not sale:
+            return messagebox.showerror('Error','Sale not found')
+        sale = sale[0]
+        fp = os.path.join(RECEIPT_FOLDER, f'receipt_{sale_id}.pdf')
+        c = pdf_canvas.Canvas(fp, pagesize=A4); width, height = A4; y = height - 60
+        c.setFont('Helvetica-Bold', 14); c.drawString(50, y, 'Pharmacy Receipt'); y -= 25
+        c.setFont('Helvetica', 10); c.drawString(50, y, f'Sale ID: {sale_id}'); c.drawString(300, y, f'Date: {sale["created_at"]}'); y -= 20
+        if sale['customer_name']: c.drawString(50, y, f'Customer: {sale["customer_name"]}'); c.drawString(300, y, f'Phone: {sale["customer_phone"] or ""}'); y -= 20
+        c.drawString(50, y, f'Cashier ID: {sale["user_id"]}'); y -= 25
+        c.setFont('Helvetica-Bold', 10); c.drawString(50, y, 'Product'); c.drawString(300, y, 'Qty'); c.drawString(360, y, 'Price'); c.drawString(430, y, 'Subtotal'); y -= 15
+        c.setFont('Helvetica', 10)
+        for it in items:
+            c.drawString(50, y, str(it['name'])); c.drawString(300, y, str(it['quantity'])); c.drawString(360, y, f"{it['price']:.2f}"); c.drawString(430, y, f"{it['price']*it['quantity']:.2f}"); y -= 15
+            if y < 80:
+                c.showPage(); y = height - 60
+        c.setFont('Helvetica-Bold', 12); c.drawString(50, y-20, f'Total: {sale["total"]:.2f}')
+        c.save()
+        try:
+            os.startfile(fp)
+        except Exception:
+            pass
+        messagebox.showinfo('Receipt Saved', f'Saved to {fp}')
+
+    # ---------------- Return History ----------------
+    def _build_return_history_tab(self):
+        # kept for backward compatibility (not used as top-level)
+        pass
+
+    def _return_refresh(self):
+        tree = getattr(self, '_return_tree', None)
+        if not tree: return
+        tree.delete(*tree.get_children())
+        rows = self.db.query('''SELECT r.id, r.sale_item_id AS sale_item, p.name AS product, r.quantity AS qty, r.reason, r.created_at AS created, b.expiry_date AS expiry
+            FROM returns r JOIN sale_items si ON si.id=r.sale_item_id JOIN products p ON p.id=si.product_id
+            LEFT JOIN sale_item_batches sib ON sib.sale_item_id=si.id LEFT JOIN batches b ON b.id=sib.batch_id
+            ORDER BY r.id DESC LIMIT 500;''')
+        for r in rows:
+            tree.insert('', 'end', values=(r['id'], r['sale_item'], r['product'], r['qty'], r['reason'], r['created'], r['expiry'] or ''))
+
+    # ---------------- Reports (build into provided frame) ----------------
+    def _build_reports_in_frame(self, frame):
+        for w in frame.winfo_children(): w.destroy()
+        f = ttk.Frame(frame); f.pack(fill='x', padx=8, pady=6)
+        ttk.Label(f, text='Supplier').grid(row=0, column=0, sticky='e', padx=4, pady=4)
+        sup_e = AutocompleteEntry(f, suggestions_getter=self._supplier_suggestions, width=30); sup_e.grid(row=0, column=1, padx=4)
+        ttk.Label(f, text='Manufacturer').grid(row=0, column=2, sticky='e', padx=4)
+        man_e = AutocompleteEntry(f, suggestions_getter=self._manufacturer_suggestions, width=30); man_e.grid(row=0, column=3, padx=4)
+        ttk.Label(f, text='Product').grid(row=1, column=0, sticky='e', padx=4)
+        prod_e = AutocompleteEntry(f, suggestions_getter=self._product_suggestions, width=30); prod_e.grid(row=1, column=1, padx=4)
+        ttk.Label(f, text='From Date').grid(row=1, column=2, sticky='e', padx=4)
+        if TKCAL_AVAILABLE:
+            from_e = DateEntry(f, width=12); from_e.grid(row=1, column=3, padx=4)
+        else:
+            from_e = ttk.Entry(f, width=12); from_e.grid(row=1, column=3, padx=4)
+        ttk.Button(f, text='Apply', command=lambda: self._apply_report_filters(sup_e.get().strip(), man_e.get().strip(), prod_e.get().strip(), from_e.get().strip())).grid(row=2, column=0, columnspan=4, pady=8)
+        cols = ('sale_id','date','customer','product','qty','price','subtotal')
+        tree = ttk.Treeview(frame, columns=cols, show='headings')
+        for c in cols: tree.heading(c, text=c.capitalize()); tree.column(c, width=120, anchor='w')
+        tree.pack(fill='both', expand=True, padx=8, pady=6)
+        self._report_tree = tree
+
+    def _build_reports_tab(self):
+        # kept for fallback; builds into self.tab_reports if present
+        self._build_reports_in_frame(self.tab_reports)
+
+    def _apply_report_filters(self, supplier, manufacturer, product, from_date):
+        tree = getattr(self, '_report_tree', None)
+        if not tree: return
+        tree.delete(*tree.get_children())
+        where = []; params = []
+        if supplier:
+            where.append('sup.name LIKE ?'); params.append(f'%{supplier}%')
+        if manufacturer:
+            where.append('m.name LIKE ?'); params.append(f'%{manufacturer}%')
+        if product:
+            where.append('p.name LIKE ?'); params.append(f'%{product}%')
+        if from_date:
+            try:
+                dt = from_date
+                if len(dt) == 10:
+                    where.append("s.created_at >= ?"); params.append(dt + " 00:00:00")
+            except:
+                pass
+        where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+        sql = f'''SELECT s.id AS sale_id, s.created_at AS date, s.customer_name AS customer, p.name AS product, si.quantity AS qty, si.price AS price, (si.quantity*si.price) AS subtotal
+            FROM sales s JOIN sale_items si ON si.sale_id=s.id JOIN products p ON p.id=si.product_id
+            LEFT JOIN sale_item_batches sib ON sib.sale_item_id=si.id LEFT JOIN batches b ON b.id=sib.batch_id
+            LEFT JOIN suppliers sup ON sup.id=b.supplier_id
+            LEFT JOIN manufacturers m ON m.id=p.manufacturer_id
+            {where_sql}
+            ORDER BY s.created_at DESC LIMIT 1000;'''
+        rows = self.db.query(sql, tuple(params))
+        for r in rows:
+            self._report_tree.insert('', 'end', values=(r['sale_id'], r['date'], r['customer'] or '', r['product'], r['qty'], f"{r['price']:.2f}", f"{r['subtotal']:.2f}"))
+
+    # ---------------- Manage Staff ----------------
+    def _build_manage_staff_tab(self):
+        for w in self.tab_manage_staff.winfo_children(): w.destroy()
+        header = ttk.Frame(self.tab_manage_staff); header.pack(fill='x', pady=6)
+        ttk.Label(header, text='Manage Staff', font=('Segoe UI',14,'bold')).pack(side='left', padx=8)
+        ttk.Button(header, text='Add Staff', command=self._add_staff).pack(side='right', padx=6)
+        tree = ttk.Treeview(self.tab_manage_staff, columns=('id','username','role'), show='headings')
+        for c in ('id','username','role'): tree.heading(c, text=c.capitalize()); tree.column(c, width=150, anchor='w')
+        tree.pack(fill='both', expand=True, padx=8, pady=8)
+        self._staff_tree = tree
+        self._refresh_staff()
+
+    def _refresh_staff(self):
+        tree = getattr(self, '_staff_tree', None)
+        if not tree: return
+        tree.delete(*tree.get_children())
+        rows = self.db.query("SELECT id,username,role FROM users WHERE role IN ('staff','cashier') ORDER BY role,username;")
+        for r in rows: tree.insert('', 'end', values=(r['id'], r['username'], r['role']))
+
+    def _add_staff(self):
+        def save(d):
+            uname = d.get('username','').strip(); role = d.get('role','staff'); pw = d.get('password','').strip()
+            if not uname or not pw: return messagebox.showerror('Error','Username and password required')
+            exists = self.db.query('SELECT id FROM users WHERE username=?;',(uname,))
+            if exists:
+                return messagebox.showerror('Error','Username already exists. Choose another username.')
+            self.db.execute('INSERT INTO users(username,password_hash,role) VALUES(?,?,?);',(uname, hash_pw(pw), role))
+            messagebox.showinfo('Saved','User created'); self._refresh_staff()
+        FormDialog(self.root, 'Add Staff', [
+            {'key':'username','label':'Username'},
+            {'key':'password','label':'Password'},
+            {'key':'role','label':'Role','widget':'combobox','values':['staff','cashier'],'state':'readonly'}
+        ], initial={'role':'staff'}, on_submit=save)
+
+    # ---------------- Import/Export & Backup ----------------
+    def _build_import_export_tab(self):
+        for w in self.tab_import_export.winfo_children(): w.destroy()
+        frm = ttk.Frame(self.tab_import_export); frm.pack(fill='x', padx=8, pady=8)
+        ttk.Label(frm, text='Import / Export (Admin)').pack(anchor='w')
+        target_cb = ttk.Combobox(frm, values=['products','batches','suppliers','manufacturers','categories','formulas','customers'], state='readonly'); target_cb.set('products'); target_cb.pack(side='left', padx=6)
+        ttk.Button(frm, text='Import CSV', command=lambda: self._import_csv(target_cb.get())).pack(side='left', padx=6)
+        ttk.Button(frm, text='Export CSV', command=lambda: self._export_csv(target_cb.get())).pack(side='left', padx=6)
+        ttk.Button(frm, text='Export XLSX', command=lambda: self._export_xlsx(target_cb.get())).pack(side='left', padx=6)
+        bfr = ttk.Frame(self.tab_import_export); bfr.pack(fill='x', padx=8, pady=8)
+        ttk.Button(bfr, text='Backup Now', command=self._backup_now).pack(side='left', padx=6)
+        self.auto_backup_var = tk.IntVar(value=int(self.db.query('SELECT value FROM settings WHERE key="auto_backup_enabled";')[0]['value']))
+        ttk.Checkbutton(bfr, text='Enable Auto Backup (every 12 hours this session)', variable=self.auto_backup_var, command=self._toggle_auto_backup).pack(side='left', padx=6)
+        self._auto_job = None
+        if self.auto_backup_var.get(): self._schedule_auto_backup()
+
+    def _import_csv(self, target):
+        path = filedialog.askopenfilename(filetypes=[('CSV','*.csv'),('All files','*.*')])
+        if not path: return
+        cnt = 0
+        try:
+            with open(path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if target == 'products':
+                        self.db.execute('INSERT OR IGNORE INTO products(name,sku,unit,sale_price,notes) VALUES(?,?,?,?,?);',
+                                        (row.get('name') or row.get('Name'), row.get('sku'), row.get('unit'), float(row.get('sale_price') or 0), row.get('notes') or ''))
+                        cnt += 1
+                    elif target == 'suppliers':
+                        self.db.execute('INSERT OR IGNORE INTO suppliers(name,phone,email,address) VALUES(?,?,?,?);', (row.get('name'), row.get('phone'), row.get('email'), row.get('address'))); cnt += 1
+                    elif target == 'manufacturers':
+                        self.db.execute('INSERT OR IGNORE INTO manufacturers(name,contact,notes) VALUES(?,?,?);', (row.get('name'), row.get('contact'), row.get('notes'))); cnt += 1
+                    elif target == 'categories':
+                        self.db.execute('INSERT OR IGNORE INTO categories(name,notes) VALUES(?,?);', (row.get('name'), row.get('notes'))); cnt += 1
+                    elif target == 'formulas':
+                        self.db.execute('INSERT OR IGNORE INTO formulas(name,composition) VALUES(?,?);', (row.get('name'), row.get('composition'))); cnt += 1
+                    elif target == 'customers':
+                        self.db.execute('INSERT OR IGNORE INTO customers(name,phone,notes) VALUES(?,?,?);', (row.get('name'), row.get('phone'), row.get('notes'))); cnt += 1
+                    elif target == 'batches':
+                        pid = None
+                        if row.get('product_sku'):
+                            p = self.db.query('SELECT id FROM products WHERE sku=?;',(row.get('product_sku'),))
+                            if p: pid = p[0]['id']
+                        if not pid and row.get('product_name'):
+                            p = self.db.query('SELECT id FROM products WHERE name=?;',(row.get('product_name'),))
+                            if p: pid = p[0]['id']
+                        sid = None
+                        if row.get('supplier'):
+                            s = self.db.query('SELECT id FROM suppliers WHERE name=?;',(row.get('supplier'),))
+                            if s: sid = s[0]['id']
+                        if pid:
+                            self.db.execute('INSERT INTO batches(product_id,supplier_id,batch_no,quantity,expiry_date,cost_price,created_at) VALUES(?,?,?,?,?,?,?);',
+                                            (pid, sid, row.get('batch_no') or '', int(row.get('quantity') or 0), row.get('expiry_date') or None, float(row.get('cost_price') or 0), now_str()))
+                            cnt += 1
+            messagebox.showinfo('Import', f'Imported approx {cnt} rows.')
+            self._inv_refresh_all()
+        except Exception as e:
+            messagebox.showerror('Import Error', str(e))
+
+    def _export_csv(self, target):
+        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV','*.csv')])
+        if not path: return
+        rows=[]; headers=[]
+        if target == 'products':
+            rows = self.db.query('SELECT name,sku,unit,sale_price,notes FROM products ORDER BY name;'); headers=['name','sku','unit','sale_price','notes']
+        elif target == 'batches':
+            rows = self.db.query('SELECT p.name as product, b.batch_no, b.quantity, b.expiry_date, s.name as supplier FROM batches b LEFT JOIN products p ON p.id=b.product_id LEFT JOIN suppliers s ON s.id=b.supplier_id ORDER BY b.id DESC;'); headers=['product','batch_no','quantity','expiry_date','supplier']
+        elif target == 'suppliers':
+            rows = self.db.query('SELECT name,phone,email,address FROM suppliers ORDER BY name;'); headers=['name','phone','email','address']
+        elif target == 'manufacturers':
+            rows = self.db.query('SELECT name,contact,notes FROM manufacturers ORDER BY name;'); headers=['name','contact','notes']
+        elif target == 'categories':
+            rows = self.db.query('SELECT name,notes FROM categories ORDER BY name;'); headers=['name','notes']
+        elif target == 'formulas':
+            rows = self.db.query('SELECT name,composition FROM formulas ORDER BY name;'); headers=['name','composition']
+        elif target == 'customers':
+            rows = self.db.query('SELECT name,phone,notes FROM customers ORDER BY name;'); headers=['name','phone','notes']
+        with open(path, 'w', newline='', encoding='utf-8') as f:
+            w = csv.writer(f); w.writerow(headers)
+            for r in rows: w.writerow([r.get(h,'') for h in headers])
+        messagebox.showinfo('Export', f'Exported {len(rows)} rows to {path}')
+
+    def _export_xlsx(self, target):
+        if not OPENPYXL_AVAILABLE:
+            return messagebox.showerror('Missing', 'openpyxl required for XLSX export')
+        path = filedialog.asksaveasfilename(defaultextension='.xlsx', filetypes=[('Excel','*.xlsx')])
+        if not path: return
+        rows=[]; headers=[]
+        if target == 'products':
+            rows = self.db.query('SELECT name,sku,unit,sale_price,notes FROM products ORDER BY name;'); headers=['name','sku','unit','sale_price','notes']
+        elif target == 'batches':
+            rows = self.db.query('SELECT p.name as product, b.batch_no, b.quantity, b.expiry_date, s.name as supplier FROM batches b LEFT JOIN products p ON p.id=b.product_id LEFT JOIN suppliers s ON s.id=b.supplier_id ORDER BY b.id DESC;'); headers=['product','batch_no','quantity','expiry_date','supplier']
+        elif target == 'suppliers':
+            rows = self.db.query('SELECT name,phone,email,address FROM suppliers ORDER BY name;'); headers=['name','phone','email','address']
+        elif target == 'manufacturers':
+            rows = self.db.query('SELECT name,contact,notes FROM manufacturers ORDER BY name;'); headers=['name','contact','notes']
+        elif target == 'categories':
+            rows = self.db.query('SELECT name,notes FROM categories ORDER BY name;'); headers=['name','notes']
+        elif target == 'formulas':
+            rows = self.db.query('SELECT name,composition FROM formulas ORDER BY name;'); headers=['name','composition']
+        elif target == 'customers':
+            rows = self.db.query('SELECT name,phone,notes FROM customers ORDER BY name;'); headers=['name','phone','notes']
+        from openpyxl import Workbook
+        wb = Workbook(); ws = wb.active; ws.append(headers)
+        for r in rows: ws.append([r.get(h,'') for h in headers])
+        wb.save(path); messagebox.showinfo('Export', f'Exported {len(rows)} rows to {path}')
+
+    def _backup_now(self):
+        ts = datetime.now().strftime('%Y%m%d%H%M%S')
+        dst = os.path.join(BACKUP_FOLDER, f'pharmacy_backup_{ts}.db')
+        try:
+            with open(DB_PATH, 'rb') as src, open(dst, 'wb') as out:
+                out.write(src.read())
+            messagebox.showinfo('Backup', f'Backup saved to {dst}')
+        except Exception as e:
+            messagebox.showerror('Backup Failed', str(e))
+
+    def _toggle_auto_backup(self):
+        val = int(self.auto_backup_var.get())
+        self.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?);', ('auto_backup_enabled', str(val)))
+        if val:
+            self._schedule_auto_backup()
+        else:
+            if getattr(self, '_auto_job', None):
+                try: self.root.after_cancel(self._auto_job)
+                except: pass
+                self._auto_job = None
+
+    def _schedule_auto_backup(self):
+        self._backup_now()
+        try:
+            self._auto_job = self.root.after(12*3600*1000, self._schedule_auto_backup)
+        except Exception:
+            pass
+
+    # ---------------- Settings ----------------
+    def _build_settings_tab(self):
+        for w in self.tab_settings.winfo_children(): w.destroy()
+        f = ttk.Frame(self.tab_settings); f.pack(fill='x', padx=8, pady=8)
+        ttk.Label(f, text='Default Tax Percent (%)').grid(row=0, column=0, sticky='w', padx=4, pady=4)
+        tax_e = ttk.Entry(f, width=8); tax_e.grid(row=0, column=1, padx=4)
+        ttk.Label(f, text='Default Discount (%)').grid(row=1, column=0, sticky='w', padx=4, pady=4)
+        disc_e = ttk.Entry(f, width=8); disc_e.grid(row=1, column=1, padx=4)
+        tax_val = self.db.query('SELECT value FROM settings WHERE key="tax_percent";')[0]['value']; tax_e.insert(0, tax_val)
+        disc_val = self.db.query('SELECT value FROM settings WHERE key="default_discount";')[0]['value']; disc_e.insert(0, disc_val)
+        def save():
+            self.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?);', ('tax_percent', tax_e.get().strip()))
+            self.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?);', ('default_discount', disc_e.get().strip()))
+            messagebox.showinfo('Saved','Settings saved')
+        ttk.Button(f, text='Save Settings', command=save).grid(row=3, column=0, columnspan=2, pady=8)
+
+    # ---------------- Helpers ----------------
+    def _open_tab_by_name(self, name):
+        for i in range(self.nb.index('end')):
+            if self.nb.tab(i, option='text') == name:
+                self.nb.select(i); return
+        messagebox.showinfo('Info', f'Tab {name} not found')
+
+    def _filter_inventory_low_stock(self):
+        med_rows = self.db.query("""SELECT p.id,p.name,p.sku,p.unit,c.name as category,m.name as manufacturer,p.sale_price as price,
+            COALESCE((SELECT SUM(quantity) FROM batches b WHERE b.product_id=p.id),0) AS stock FROM products p LEFT JOIN categories c ON p.category_id=c.id LEFT JOIN manufacturers m ON p.manufacturer_id=m.id WHERE p.is_medical=1 GROUP BY p.id HAVING stock<=5 ORDER BY p.name;""")
+        self._med_tree.delete(*self._med_tree.get_children())
+        for r in med_rows: self._med_tree.insert('', 'end', iid=r['id'], values=(r['id'], r['name'], r['sku'] or '', r.get('unit','') or '', r.get('category') or '', r.get('manufacturer') or '', f"{r['price']:.2f}", r['stock']))
+        non_rows = self.db.query("""SELECT p.id,p.name,p.sku,p.unit,c.name as category,m.name as manufacturer,p.sale_price as price,
+            COALESCE((SELECT SUM(quantity) FROM batches b WHERE b.product_id=p.id),0) AS stock FROM products p LEFT JOIN categories c ON p.category_id=c.id LEFT JOIN manufacturers m ON p.manufacturer_id=m.id WHERE p.is_medical=0 GROUP BY p.id HAVING stock<=5 ORDER BY p.name;""")
+        self._nonmed_tree.delete(*self._nonmed_tree.get_children())
+        for r in non_rows: self._nonmed_tree.insert('', 'end', iid=r['id'], values=(r['id'], r['name'], r['sku'] or '', r.get('unit','') or '', r.get('category') or '', r.get('manufacturer') or '', f"{r['price']:.2f}", r['stock']))
+        self._open_tab_by_name('Inventory')
+        try:
+            for child in self.tab_inventory.winfo_children():
+                if isinstance(child, ttk.Notebook):
+                    child.select(0); break
+        except Exception:
+            pass
+
+    def _filter_inventory_near_expiry(self):
+        self._batch_tree.delete(*self._batch_tree.get_children())
+        rows = self.db.query("""SELECT b.id, p.name as product, b.batch_no, b.quantity, b.expiry_date, s.name as supplier FROM batches b LEFT JOIN products p ON p.id=b.product_id LEFT JOIN suppliers s ON s.id=b.supplier_id WHERE b.expiry_date IS NOT NULL AND julianday(b.expiry_date)-julianday('now')<=30 AND b.quantity>0 ORDER BY b.expiry_date ASC;""")
+        for r in rows: self._batch_tree.insert('', 'end', values=(r['id'], r['product'], r['batch_no'] or '', r['quantity'], r['expiry_date'] or '', r['supplier'] or ''))
+        self._open_tab_by_name('Inventory')
+        try:
+            for child in self.tab_inventory.winfo_children():
+                if isinstance(child, ttk.Notebook):
+                    nb = child; nb.select(nb.index('end')-1); break
+        except Exception:
+            pass
+
+    def _open_low_stock(self):
+        try:
+            self._filter_inventory_low_stock()
+        except Exception:
+            rows = self.db.query("""SELECT p.id,p.name,COALESCE((SELECT SUM(quantity) FROM batches b WHERE b.product_id=p.id),0) AS stock FROM products p GROUP BY p.id HAVING stock<=5;""")
+            dlg = tk.Toplevel(self.root); dlg.title('Low Stock Items'); dlg.geometry('700x400')
+            tree = ttk.Treeview(dlg, columns=('id','name','stock'), show='headings'); tree.pack(fill='both', expand=True, padx=8, pady=8)
+            for c in ('id','name','stock'): tree.heading(c, text=c.capitalize()); tree.column(c,width=200,anchor='w')
+            for r in rows: tree.insert('', 'end', values=(r['id'], r['name'], r['stock']))
+            ttk.Button(dlg, text='Close', command=dlg.destroy).pack(pady=6)
+
+    def _open_near_expiry(self):
+        try:
+            self._filter_inventory_near_expiry()
+        except Exception:
+            rows = self.db.query("""SELECT b.id, p.name AS product, b.batch_no, b.quantity, b.expiry_date FROM batches b JOIN products p ON p.id=b.product_id WHERE b.expiry_date IS NOT NULL AND julianday(b.expiry_date)-julianday('now')<=30 AND b.quantity>0 ORDER BY b.expiry_date ASC;""")
+            dlg = tk.Toplevel(self.root); dlg.title('Near Expiry (<=30 days)'); dlg.geometry('800x420')
+            tree = ttk.Treeview(dlg, columns=('id','product','batch_no','quantity','expiry'), show='headings'); tree.pack(fill='both', expand=True, padx=8, pady=8)
+            for c in ('id','product','batch_no','quantity','expiry'): tree.heading(c, text=c.capitalize()); tree.column(c,width=150,anchor='w')
+            for r in rows: tree.insert('', 'end', values=(r['id'], r['product'], r['batch_no'] or '', r['quantity'], r['expiry_date'] or ''))
+            ttk.Button(dlg, text='Close', command=dlg.destroy).pack(pady=6)
+
+    # autocomplete helpers
+    def _supplier_suggestions(self, term):
+        rows = self.db.query('SELECT name FROM suppliers WHERE name LIKE ? ORDER BY name LIMIT 10;', (f'%{term}%',))
+        return [r['name'] for r in rows]
+
+    def _manufacturer_suggestions(self, term):
+        rows = self.db.query('SELECT name FROM manufacturers WHERE name LIKE ? ORDER BY name LIMIT 10;', (f'%{term}%',))
+        return [r['name'] for r in rows]
+
+    def _product_suggestions(self, term):
+        rows = self.db.query('SELECT name, sale_price FROM products WHERE name LIKE ? ORDER BY name LIMIT 12;', (f'%{term}%',))
+        return [r['name'] for r in rows]
+
+    # ---------------- Staff (already implemented above) ----------------
+
+    # ---------------- Seeder ----------------
+    def _seed_test_data(self):
+        try:
+            cnt = self.db.query('SELECT COUNT(*) AS c FROM products;')[0]['c']
+            if cnt > 0: return
+            man1 = self.db.execute('INSERT OR IGNORE INTO manufacturers(name,contact) VALUES(?,?);', ('GoodPharma','contact1'))
+            sup1 = self.db.execute('INSERT OR IGNORE INTO suppliers(name,phone) VALUES(?,?);', ('SupplyCo','1234567890'))
+            self.db.execute('INSERT OR IGNORE INTO formulas(name,composition) VALUES(?,?);', ('Paracetamol 500mg','Paracetamol'))
+            self.db.execute('INSERT OR IGNORE INTO categories(name) VALUES(?);', ('Analgesics',))
+            pid1 = self.db.execute('INSERT INTO products(name,sku,is_medical,unit,sale_price) VALUES(?,?,?,?,?);', ('Paracetamol 500mg','PARA500',1,'tablet',0.50))
+            pid2 = self.db.execute('INSERT INTO products(name,sku,is_medical,unit,sale_price) VALUES(?,?,?,?,?);', ('Ibuprofen 200mg','IBU200',1,'tablet',0.75))
+            pid3 = self.db.execute('INSERT INTO products(name,sku,is_medical,unit,sale_price) VALUES(?,?,?,?,?);', ('Cough Syrup 100ml','COUGH100',1,'ml',3.50))
+            self.db.execute('INSERT INTO batches(product_id,quantity,expiry_date,created_at) VALUES(?,?,?,?);', (pid1,50, (datetime.now()+timedelta(days=20)).strftime('%Y-%m-%d'), now_str()))
+            self.db.execute('INSERT INTO batches(product_id,quantity,expiry_date,created_at) VALUES(?,?,?,?);', (pid2,10, (datetime.now()+timedelta(days=200)).strftime('%Y-%m-%d'), now_str()))
+            self.db.execute('INSERT INTO batches(product_id,quantity,expiry_date,created_at) VALUES(?,?,?,?);', (pid3,5, (datetime.now()+timedelta(days=10)).strftime('%Y-%m-%d'), now_str()))
+            cid = self.db.execute('INSERT INTO customers(name,phone) VALUES(?,?);', ('Alice','5551112222'))
+            sale1 = self.db.execute('INSERT INTO sales(user_id,total,customer_id,customer_name,customer_phone,created_at) VALUES(?,?,?,?,?,?);', (1, 15.0, cid, 'Alice','5551112222', now_str()))
+            si = self.db.execute('INSERT INTO sale_items(sale_id,product_id,quantity,price) VALUES(?,?,?,?);', (sale1, pid1, 2, 0.5))
+            batches = self.db.query('SELECT id,quantity FROM batches WHERE product_id=? ORDER BY created_at ASC;', (pid1,))
+            need = 2
+            for b in batches:
+                take = min(need, b['quantity'])
+                if take>0:
+                    self.db.execute('UPDATE batches SET quantity=quantity-? WHERE id=?;', (take, b['id']))
+                    need -= take
+                if need<=0: break
+        except Exception as e:
+            print('Seeder error', e)
+
+    # ---------------- End App ----------------
+    def run(self):
+        self.root.mainloop()
+
+
+if __name__ == '__main__':
+    app = App()
+    app.run()
