@@ -1602,13 +1602,16 @@ class App:
         ttk.Button(export_frame, text="Export Excel", 
                 command=lambda: self._export_report(tree, "excel")).pack(side='left', padx=5)
         
+        # Set the report tree attribute
         self._report_tree = tree
         self._load_all_sales()  # Load initial data
-        
-    def run(self):
-        self.root.mainloop()
-# Fix the _apply_report_filters method to accept the correct number of parameters
+
+   # Change the method signature to accept all 5 filter parameters
     def _apply_report_filters(self, from_date, to_date, product_filter, customer_filter, supplier_filter):
+        # Check if report tree is initialized
+        if not hasattr(self, '_report_tree') or self._report_tree is None:
+            return
+        
         query = '''
             SELECT 
                 s.id AS sale_id, 
@@ -1668,6 +1671,53 @@ class App:
                 ))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load report data: {str(e)}")
+
+    def _load_all_sales(self):
+        # Check if report tree is initialized
+        if not hasattr(self, '_report_tree') or self._report_tree is None:
+            return
+        
+        try:
+            rows = self.db.query('''
+                SELECT 
+                    s.id AS sale_id, 
+                    s.created_at AS date, 
+                    s.customer_name AS customer,
+                    p.name AS product, 
+                    si.quantity AS quantity, 
+                    si.price AS price,
+                    (si.quantity * si.price) AS subtotal,
+                    sup.name AS supplier
+                FROM sales s
+                JOIN sale_items si ON si.sale_id = s.id
+                JOIN products p ON p.id = si.product_id
+                LEFT JOIN sale_item_batches sib ON sib.sale_item_id = si.id
+                LEFT JOIN batches b ON b.id = sib.batch_id
+                LEFT JOIN suppliers sup ON sup.id = b.supplier_id
+                ORDER BY s.created_at DESC LIMIT 500
+            ''')
+            
+            self._report_tree.delete(*self._report_tree.get_children())
+            
+            for r in rows:
+                self._report_tree.insert('', 'end', values=(
+                    r['sale_id'], 
+                    r['date'], 
+                    r['customer'] or 'N/A',
+                    r['product'], 
+                    r['quantity'], 
+                    f"{r['price']:.2f}",
+                    f"{r['subtotal']:.2f}",
+                    r['supplier'] or 'N/A'
+                ))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load sales data: {str(e)}")
+
+    def run(self):
+        self.root.mainloop()
+# Fix the _apply_report_filters method to accept the correct number of parameters
+   
+         
 
     def _load_all_sales(self):
         try:
