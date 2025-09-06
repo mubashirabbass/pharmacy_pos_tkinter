@@ -1,18 +1,4 @@
-# 3_modified.py
-# Pharmacy Management System - merged & updated
-# Features:
-# - Modern login (role selection admin/staff/cashier)
-# - Dashboard: colorful bank-style cards (ttkbootstrap), vector icons, 1s count-up animation, clickable
-# - Inventory: products, units (mg, ml, tablet...), batches with expiry, aligned layout
-# - POS: autocomplete product & customer, validate stock (no sale if insufficient), customer saved, print receipt (reportlab)
-# - Sale History: show all sale item-level details; print receipt for a selected sale
-# - Sale Report: filters (supplier/manufacturer/product) as autocomplete + date pickers
-# - Manage Staff (admin): add/edit/delete staff & cashier; fixed seed issue
-# - Import/Export (admin): CSV import/export, XLSX export (openpyxl), manual + auto backup
-# - Settings (admin): tax % and default discount %
-# - Return History: shows product and expiry, reason
-# - UI alignment consistent across notebook tabs
-# - Uses sqlite3 for database (pharmacy.db)
+
 
 import os
 import sqlite3

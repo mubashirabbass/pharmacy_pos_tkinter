@@ -422,29 +422,58 @@ class NewSaleTab(ttk.Frame):
         cust_name = self.customer_name_e.get().strip()
         cust_phone = self.customer_phone_e.get().strip()
         total = sum(i['subtotal'] for i in self.cart)
-        sid = self.db.execute("INSERT INTO sales(user_id,total,customer_name,customer_phone,created_at) VALUES(?,?,?,?,?);", (self.user['id'], total, cust_name, cust_phone, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        
+        # Get current timestamp
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        sid = self.db.execute(
+            "INSERT INTO sales(user_id,total,customer_name,customer_phone,created_at) VALUES(?,?,?,?,?);", 
+            (self.user['id'], total, cust_name, cust_phone, created_at)
+        )
+        
         for i in self.cart:
-            self.db.execute("INSERT INTO sale_items(sale_id,product_id,quantity,price) VALUES(?,?,?,?);", (sid, i['id'], i['qty'], i['price']))
-            self._fifo_deduct(i['id'], i['qty'], i['name'])
+            # Insert sale item
+            sale_item_id = self.db.execute(
+                "INSERT INTO sale_items(sale_id,product_id,quantity,price) VALUES(?,?,?,?);", 
+                (sid, i['id'], i['qty'], i['price'])
+            )
+            
+            # Update batches and create sale_item_batches entries
+            self._fifo_deduct_with_batch_tracking(i['id'], i['qty'], sale_item_id, i['name'])
+        
         if messagebox.askyesno("Print Receipt", "Do you want to print a receipt?"):
             self.generate_receipt(sid, total, cust_name, cust_phone)
+        
         messagebox.showinfo("Sale Complete", f"Sale #{sid} completed.")
-        self.cart.clear(); self.refresh()
-        try:
-            self.master.master._build_sale_history_tab()
-        except Exception as e:
-            print("Sale history refresh error:", e)
+        self.cart.clear()
+        self.refresh()
 
-    def _fifo_deduct(self, product_id, qty_needed, pname):
-        batches = self.db.query("SELECT id, quantity FROM batches WHERE product_id=? AND quantity>0 ORDER BY created_at ASC;", (product_id,))
+    def _fifo_deduct_with_batch_tracking(self, product_id, qty_needed, sale_item_id, pname):
+        batches = self.db.query(
+            "SELECT id, quantity FROM batches WHERE product_id=? AND quantity>0 ORDER BY created_at ASC;", 
+            (product_id,)
+        )
         remain = qty_needed
+        
         for b in batches:
-            if remain <= 0: break
+            if remain <= 0:
+                break
             take = min(remain, b['quantity'])
+            
+            # Update batch quantity
             self.db.execute("UPDATE batches SET quantity=quantity-? WHERE id=?;", (take, b['id']))
+            
+            # Create sale_item_batches entry
+            self.db.execute(
+                "INSERT INTO sale_item_batches(sale_item_id, batch_id, quantity) VALUES(?,?,?);",
+                (sale_item_id, b['id'], take)
+            )
+            
             remain -= take
+        
         if remain > 0:
             messagebox.showwarning("Stock Warning", f"Product {pname} had insufficient stock. Short by {remain}.")
+    
 
     def generate_receipt(self, sale_id, total, cust_name, cust_phone):
         try:
@@ -1258,7 +1287,6 @@ class App:
         except Exception as e: messagebox.showerror('Error',str(e))
 
     # ---------------- POS with nested tabs ----------------
-
     def _build_pos_tab(self):
         # Clear POS tab
         for w in self.tab_pos.winfo_children():
@@ -1314,14 +1342,76 @@ class App:
         reports_tab = ttk.Frame(pos_nb)
         pos_nb.add(reports_tab, text='Sale Reports')
         try:
-            self._build_reports_tab(reports_tab)
+            # Use the fixed reports implementation
+            self._build_reports_in_frame(reports_tab)
         except Exception as e:
-            print(f"Error building modern reports: {e}")
-            # Fallback to old method
-            try:
-                self._build_reports_in_frame(reports_tab)
-            except Exception:
-                pass
+            print(f"Error building reports: {e}")
+            # Simple fallback
+            ttk.Label(reports_tab, text="Reports functionality not available").pack(pady=20)
+
+    # def _build_pos_tab(self):
+    #     # Clear POS tab
+    #     for w in self.tab_pos.winfo_children():
+    #         w.destroy()
+    #     pos_nb = ttk.Notebook(self.tab_pos)
+    #     pos_nb.pack(fill='both', expand=True, padx=8, pady=8)
+
+    #     # --- New Sale ---
+    #     new_sale_tab = ttk.Frame(pos_nb)
+    #     pos_nb.add(new_sale_tab, text='New Sale')
+    #     NewSaleTab(new_sale_tab, self.db, self.user).pack(fill='both', expand=True)
+
+    #     # --- Sale History ---
+    #     history_tab = ttk.Frame(pos_nb)
+    #     pos_nb.add(history_tab, text='Sale History')
+    #     self._sale_history_tree = ttk.Treeview(
+    #         history_tab,
+    #         columns=('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'),
+    #         show='headings', height=18
+    #     )
+    #     for c in ('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'):
+    #         self._sale_history_tree.heading(c, text=c.capitalize())
+    #         self._sale_history_tree.column(c, width=120, anchor='w')
+    #     self._sale_history_tree.pack(fill='both', expand=True, padx=8, pady=8)
+    #     btns = ttk.Frame(history_tab)
+    #     btns.pack(fill='x')
+    #     ttk.Button(btns, text='Refresh', command=self._sale_history_refresh).pack(side='left', padx=6)
+    #     ttk.Button(btns, text='Print Receipt (Selected)', command=self._sale_history_print_selected).pack(side='left', padx=6)
+    #     try:
+    #         self._sale_history_refresh()
+    #     except Exception:
+    #         pass
+
+    #     # --- Return History ---
+    #     returns_tab = ttk.Frame(pos_nb)
+    #     pos_nb.add(returns_tab, text='Return History')
+    #     self._return_tree = ttk.Treeview(
+    #         returns_tab,
+    #         columns=('id','sale_item','product','qty','reason','created','expiry'),
+    #         show='headings'
+    #     )
+    #     for c in ('id','sale_item','product','qty','reason','created','expiry'):
+    #         self._return_tree.heading(c, text=c.capitalize())
+    #         self._return_tree.column(c, width=120, anchor='w')
+    #     self._return_tree.pack(fill='both', expand=True, padx=8, pady=8)
+    #     ttk.Button(returns_tab, text='Refresh', command=self._return_refresh).pack(anchor='e', padx=8, pady=6)
+    #     try:
+    #         self._return_refresh()
+    #     except Exception:
+    #         pass
+
+    #     # --- Sale Reports ---
+    #     reports_tab = ttk.Frame(pos_nb)
+    #     pos_nb.add(reports_tab, text='Sale Reports')
+    #     try:
+    #         self._build_reports_tab(reports_tab)
+    #     except Exception as e:
+    #         print(f"Error building modern reports: {e}")
+    #         # Fallback to old method
+    #         try:
+    #             self._build_reports_in_frame(reports_tab)
+    #         except Exception:
+    #             pass
 
 
     def _build_sale_history_tab(self):
@@ -1330,21 +1420,40 @@ class App:
 
     def _sale_history_refresh(self):
         tree = getattr(self, '_sale_history_tree', None)
-        if not tree: return
+        if not tree:
+            return
+        
         tree.delete(*tree.get_children())
-        rows = self.db.query('''SELECT s.id AS sale_id, s.created_at AS date, s.customer_name AS customer,
-            p.name AS product, sib.quantity AS qty, si.price AS price, b.expiry_date AS expiry,
-            sup.name AS supplier, m.name AS manufacturer, (sib.quantity*si.price) AS subtotal
+        
+        # Simplified query that doesn't rely on sale_item_batches
+        rows = self.db.query('''
+            SELECT 
+                s.id AS sale_id, 
+                s.created_at AS date, 
+                s.customer_name AS customer,
+                p.name AS product, 
+                si.quantity AS qty, 
+                si.price AS price,
+                (si.quantity * si.price) AS subtotal
             FROM sales s
-            JOIN sale_items si ON si.sale_id=s.id
-            JOIN sale_item_batches sib ON sib.sale_item_id=si.id
-            JOIN batches b ON b.id=sib.batch_id
-            JOIN products p ON p.id=si.product_id
-            LEFT JOIN suppliers sup ON sup.id=b.supplier_id
-            LEFT JOIN manufacturers m ON m.id=p.manufacturer_id
-            ORDER BY s.created_at DESC LIMIT 200;''')
+            JOIN sale_items si ON si.sale_id = s.id
+            JOIN products p ON p.id = si.product_id
+            ORDER BY s.created_at DESC LIMIT 200;
+        ''')
+        
         for r in rows:
-            tree.insert('', 'end', values=(r['sale_id'], r['date'], r['customer'] or '', r['product'], r['qty'], f"{r['price']:.2f}", r['expiry'] or '', r['supplier'] or '', r['manufacturer'] or '', f"{r['subtotal']:.2f}"))
+            tree.insert('', 'end', values=(
+                r['sale_id'], 
+                r['date'], 
+                r['customer'] or '', 
+                r['product'], 
+                r['qty'], 
+                f"{r['price']:.2f}", 
+                "",  # expiry (empty for now)
+                "",  # supplier (empty for now)
+                "",  # manufacturer (empty for now)
+                f"{r['subtotal']:.2f}"
+            ))
 
     def _sale_history_print_selected(self):
         sel = self._sale_history_tree.selection()
@@ -1401,164 +1510,449 @@ class App:
             tree.insert('', 'end', values=(r['id'], r['sale_item'], r['product'], r['qty'], r['reason'], r['created'], r['expiry'] or ''))
 
     # ---------------- Reports (build into provided frame) ----------------
+    # ... rest of your code ...
+
     def _build_reports_in_frame(self, frame):
-        for w in frame.winfo_children(): w.destroy()
-        f = ttk.Frame(frame); f.pack(fill='x', padx=8, pady=6)
-        ttk.Label(f, text='Supplier').grid(row=0, column=0, sticky='e', padx=4, pady=4)
-        sup_e = AutocompleteEntry(f, suggestions_getter=self._supplier_suggestions, width=30); sup_e.grid(row=0, column=1, padx=4)
-        ttk.Label(f, text='Manufacturer').grid(row=0, column=2, sticky='e', padx=4)
-        man_e = AutocompleteEntry(f, suggestions_getter=self._manufacturer_suggestions, width=30); man_e.grid(row=0, column=3, padx=4)
-        ttk.Label(f, text='Product').grid(row=1, column=0, sticky='e', padx=4)
-        prod_e = AutocompleteEntry(f, suggestions_getter=self._product_suggestions, width=30); prod_e.grid(row=1, column=1, padx=4)
-        ttk.Label(f, text='From Date').grid(row=1, column=2, sticky='e', padx=4)
-        if TKCAL_AVAILABLE:
-            from_e = DateEntry(f, width=12); from_e.grid(row=1, column=3, padx=4)
-        else:
-            from_e = ttk.Entry(f, width=12); from_e.grid(row=1, column=3, padx=4)
-        ttk.Button(f, text='Apply', command=lambda: self._apply_report_filters(sup_e.get().strip(), man_e.get().strip(), prod_e.get().strip(), from_e.get().strip())).grid(row=2, column=0, columnspan=4, pady=8)
-        cols = ('sale_id','date','customer','product','qty','price','subtotal')
-        tree = ttk.Treeview(frame, columns=cols, show='headings')
-        for c in cols: tree.heading(c, text=c.capitalize()); tree.column(c, width=120, anchor='w')
-        tree.pack(fill='both', expand=True, padx=8, pady=6)
-        self._report_tree = tree
-
-    # ---------------- Sale Reports Tab ----------------
-    # Add this method to your App class
-        # ---------------- Reports ----------------
-    def _build_reports_tab(self):
-        for w in self.tab_reports.winfo_children():
+        for w in frame.winfo_children(): 
             w.destroy()
+        
+        # Create filter frame
+        filter_frame = ttk.Frame(frame, padding=10)
+        filter_frame.pack(fill='x', pady=5)
+        
+        # Date range filter
+        ttk.Label(filter_frame, text="From Date:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
+        from_date = ttk.Entry(filter_frame, width=12)
+        from_date.grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(filter_frame, text="(YYYY-MM-DD)").grid(row=0, column=2, padx=2, sticky='w')
+        
+        ttk.Label(filter_frame, text="To Date:").grid(row=0, column=3, padx=5, pady=5, sticky='e')
+        to_date = ttk.Entry(filter_frame, width=12)
+        to_date.grid(row=0, column=4, padx=5, pady=5)
+        ttk.Label(filter_frame, text="(YYYY-MM-DD)").grid(row=0, column=5, padx=2, sticky='w')
+        
+        # Product filter with autocomplete
+        ttk.Label(filter_frame, text="Product:").grid(row=1, column=0, padx=5, pady=5, sticky='e')
+        product_filter = AutocompleteEntry(
+            filter_frame, 
+            width=20,
+            suggestions_getter=self._product_suggestions
+        )
+        product_filter.grid(row=1, column=1, padx=5, pady=5)
 
-        frm = ttk.Frame(self.tab_reports, padding=10)
-        frm.pack(fill='both', expand=True)
+        # Customer filter with autocomplete
+        ttk.Label(filter_frame, text="Customer:").grid(row=1, column=3, padx=5, pady=5, sticky='e')
+        customer_filter = AutocompleteEntry(
+            filter_frame, 
+            width=20,
+            suggestions_getter=self._customer_suggestions
+        )
+        customer_filter.grid(row=1, column=4, padx=5, pady=5)
 
-        # ---- Filters ----
-        filter_frm = ttk.LabelFrame(frm, text="Filters")
-        filter_frm.pack(fill='x', pady=6)
+        # Supplier filter with autocomplete
+        ttk.Label(filter_frame, text="Supplier:").grid(row=1, column=6, padx=5, pady=5, sticky='e')
+        supplier_filter = AutocompleteEntry(
+            filter_frame, 
+            width=20,
+            suggestions_getter=self._supplier_suggestions
+        )
+        supplier_filter.grid(row=1, column=7, padx=5, pady=5)
 
-        # Date range
-        ttk.Label(filter_frm, text="From:").pack(side='left', padx=4)
-        from_e = DateEntry(filter_frm, width=12) if TKCAL_AVAILABLE else ttk.Entry(filter_frm, width=12)
-        from_e.pack(side='left', padx=4)
-        ttk.Label(filter_frm, text="To:").pack(side='left', padx=4)
-        to_e = DateEntry(filter_frm, width=12) if TKCAL_AVAILABLE else ttk.Entry(filter_frm, width=12)
-        to_e.pack(side='left', padx=4)
-
-        # Supplier filter
-        ttk.Label(filter_frm, text="Supplier:").pack(side='left', padx=(20,4))
-        def supplier_suggestions(term):
-            rows = self.db.query("SELECT name FROM suppliers WHERE name LIKE ? LIMIT 20;", (f"%{term}%",))
-            return [r['name'] for r in rows]
-        supplier_e = AutocompleteEntry(filter_frm, suggestions_getter=supplier_suggestions, width=20)
-        supplier_e.pack(side='left', padx=4)
-
-        # Medicine filter
-        ttk.Label(filter_frm, text="Medicine:").pack(side='left', padx=(20,4))
-        def medicine_suggestions(term):
-            rows = self.db.query("SELECT name FROM products WHERE name LIKE ? LIMIT 20;", (f"%{term}%",))
-            return [r['name'] for r in rows]
-        medicine_e = AutocompleteEntry(filter_frm, suggestions_getter=medicine_suggestions, width=20)
-        medicine_e.pack(side='left', padx=4)
-
-        def load_reports():
-            tree.delete(*tree.get_children())
-            query = """SELECT s.id, s.customer_name, s.total, s.created_at, 
-                              p.name as product, sup.name as supplier
-                       FROM sales s
-                       JOIN sale_items si ON si.sale_id = s.id
-                       JOIN products p ON si.product_id = p.id
-                       LEFT JOIN batches b ON b.product_id = p.id
-                       LEFT JOIN suppliers sup ON b.supplier_id = sup.id
-                       WHERE 1=1 """
-            params = []
-
-            # Date filter
-            if from_e.get():
-                query += " AND date(s.created_at) >= date(?)"
-                params.append(from_e.get())
-            if to_e.get():
-                query += " AND date(s.created_at) <= date(?)"
-                params.append(to_e.get())
-
-            # Supplier filter
-            if supplier_e.get().strip():
-                query += " AND sup.name LIKE ?"
-                params.append(f"%{supplier_e.get().strip()}%")
-
-            # Medicine filter
-            if medicine_e.get().strip():
-                query += " AND p.name LIKE ?"
-                params.append(f"%{medicine_e.get().strip()}%")
-
-            query += " ORDER BY s.created_at DESC"
+        # Filter button
+        filter_btn = ttk.Button(filter_frame, text="Apply Filters", 
+                        command=lambda: self._apply_report_filters(
+                            from_date.get(), to_date.get(), product_filter.get(), 
+                            customer_filter.get(), supplier_filter.get()))
+        filter_btn.grid(row=2, column=0, columnspan=4, pady=10)
+        
+        # Create report treeview with supplier column
+        columns = ('sale_id', 'date', 'customer', 'product', 'quantity', 'price', 'subtotal', 'supplier')
+        tree = ttk.Treeview(frame, columns=columns, show='headings', height=15)
+        
+        # Configure columns
+        column_widths = {
+            'sale_id': 80,
+            'date': 150,
+            'customer': 150,
+            'product': 200,
+            'quantity': 80,
+            'price': 80,
+            'subtotal': 100,
+            'supplier': 150
+        }
+        
+        for col in columns:
+            tree.heading(col, text=col.replace('_', ' ').title())
+            tree.column(col, width=column_widths.get(col, 120), anchor='center')
+        
+        # Add scrollbar
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        
+        tree.pack(side='left', fill='both', expand=True, padx=10, pady=10)
+        scrollbar.pack(side='right', fill='y', padx=(0, 10), pady=10)
+        
+        # Export buttons frame - placed at the bottom
+        export_frame = ttk.Frame(frame)
+        export_frame.pack(fill='x', pady=5, padx=10)
+        
+        ttk.Button(export_frame, text="Refresh", command=self._load_all_sales).pack(side='left', padx=5)
+        ttk.Button(export_frame, text="Export CSV", 
+                command=lambda: self._export_report(tree, "csv")).pack(side='left', padx=5)
+        ttk.Button(export_frame, text="Export Excel", 
+                command=lambda: self._export_report(tree, "excel")).pack(side='left', padx=5)
+        
+        self._report_tree = tree
+        self._load_all_sales()  # Load initial data
+        
+    def run(self):
+        self.root.mainloop()
+# Fix the _apply_report_filters method to accept the correct number of parameters
+    def _apply_report_filters(self, from_date, to_date, product_filter, customer_filter, supplier_filter):
+        query = '''
+            SELECT 
+                s.id AS sale_id, 
+                s.created_at AS date, 
+                s.customer_name AS customer,
+                p.name AS product, 
+                si.quantity AS quantity, 
+                si.price AS price,
+                (si.quantity * si.price) AS subtotal,
+                sup.name AS supplier
+            FROM sales s
+            JOIN sale_items si ON si.sale_id = s.id
+            JOIN products p ON p.id = si.product_id
+            LEFT JOIN sale_item_batches sib ON sib.sale_item_id = si.id
+            LEFT JOIN batches b ON b.id = sib.batch_id
+            LEFT JOIN suppliers sup ON sup.id = b.supplier_id
+            WHERE 1=1
+        '''
+        params = []
+        
+        if from_date:
+            query += " AND date(s.created_at) >= ?"
+            params.append(from_date)
+        
+        if to_date:
+            query += " AND date(s.created_at) <= ?"
+            params.append(to_date)
+        
+        if product_filter:
+            query += " AND p.name LIKE ?"
+            params.append(f'%{product_filter}%')
+        
+        if customer_filter:
+            query += " AND s.customer_name LIKE ?"
+            params.append(f'%{customer_filter}%')
+        
+        if supplier_filter:
+            query += " AND sup.name LIKE ?"
+            params.append(f'%{supplier_filter}%')
+        
+        query += " ORDER BY s.created_at DESC"
+        
+        try:
             rows = self.db.query(query, tuple(params))
-
+            self._report_tree.delete(*self._report_tree.get_children())
+            
             for r in rows:
-                tree.insert('', 'end', values=(
-                    r['id'], r['customer_name'], r['product'], 
-                    r['supplier'] or '-', r['total'], r['created_at']
+                self._report_tree.insert('', 'end', values=(
+                    r['sale_id'], 
+                    r['date'], 
+                    r['customer'] or 'N/A',
+                    r['product'], 
+                    r['quantity'], 
+                    f"{r['price']:.2f}",
+                    f"{r['subtotal']:.2f}",
+                    r['supplier'] or 'N/A'
                 ))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load report data: {str(e)}")
 
-        ttk.Button(filter_frm, text="Load Report", command=load_reports).pack(side='left', padx=20)
+    def _load_all_sales(self):
+        try:
+            rows = self.db.query('''
+                SELECT 
+                    s.id AS sale_id, 
+                    s.created_at AS date, 
+                    s.customer_name AS customer,
+                    p.name AS product, 
+                    si.quantity AS quantity, 
+                    si.price AS price,
+                    (si.quantity * si.price) AS subtotal,
+                    sup.name AS supplier
+                FROM sales s
+                JOIN sale_items si ON si.sale_id = s.id
+                JOIN products p ON p.id = si.product_id
+                LEFT JOIN sale_item_batches sib ON sib.sale_item_id = si.id
+                LEFT JOIN batches b ON b.id = sib.batch_id
+                LEFT JOIN suppliers sup ON sup.id = b.supplier_id
+                ORDER BY s.created_at DESC LIMIT 500
+            ''')
+            
+            self._report_tree.delete(*self._report_tree.get_children())
+            
+            for r in rows:
+                self._report_tree.insert('', 'end', values=(
+                    r['sale_id'], 
+                    r['date'], 
+                    r['customer'] or 'N/A',
+                    r['product'], 
+                    r['quantity'], 
+                    f"{r['price']:.2f}",
+                    f"{r['subtotal']:.2f}",
+                    r['supplier'] or 'N/A'
+                ))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load sales data: {str(e)}")
 
-        # ---- Report Table ----
-        cols = ("Sale ID","Customer","Medicine","Supplier","Total","Date")
-        tree = ttk.Treeview(frm, columns=cols, show="headings", height=20)
-        for col in cols:
-            tree.heading(col, text=col)
-            tree.column(col, anchor='center', width=140)
-        tree.pack(fill='both', expand=True, pady=10)
+    
 
+
+    
+    # # Update the columns to include supplier
+    # columns = ('sale_id', 'date', 'customer', 'product', 'quantity', 'price', 'subtotal', 'supplier')
+    # tree = ttk.Treeview(frame, columns=columns, show='headings', height=15)
+
+    # Update column widths
+    column_widths = {
+        'sale_id': 80,
+        'date': 150,
+        'customer': 150,
+        'product': 200,
+        'quantity': 80,
+        'price': 80,
+        'subtotal': 100,
+        'supplier': 150
+    } 
+
+# Update the export methods to handle the new supplier column
+   
+
+    def _customer_suggestions(self, term):
+        rows = self.db.query('SELECT DISTINCT customer_name FROM sales WHERE customer_name LIKE ? ORDER BY customer_name LIMIT 10;', (f'%{term}%',))
+        return [r['customer_name'] for r in rows if r['customer_name']]
+
+
+
+    def _load_all_sales(self):
+        try:
+            rows = self.db.query('''
+                SELECT 
+                    s.id AS sale_id, 
+                    s.created_at AS date, 
+                    s.customer_name AS customer,
+                    p.name AS product, 
+                    si.quantity AS quantity, 
+                    si.price AS price,
+                    (si.quantity * si.price) AS subtotal
+                FROM sales s
+                JOIN sale_items si ON si.sale_id = s.id
+                JOIN products p ON p.id = si.product_id
+                ORDER BY s.created_at DESC LIMIT 500
+            ''')
+            
+            self._report_tree.delete(*self._report_tree.get_children())
+            
+            for r in rows:
+                self._report_tree.insert('', 'end', values=(
+                    r['sale_id'], 
+                    r['date'], 
+                    r['customer'] or 'N/A',
+                    r['product'], 
+                    r['quantity'], 
+                    f"{r['price']:.2f}",
+                    f"{r['subtotal']:.2f}"
+                ))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load sales data: {str(e)}")
+
+    def _export_report(self, tree, fmt="csv"):
+        try:
+            rows = [tree.item(i, "values") for i in tree.get_children()]
+            if not rows:
+                messagebox.showwarning("No Data", "No report data to export.")
+                return
+            
+            filetypes = {
+                "csv": [("CSV Files", "*.csv")],
+                "excel": [("Excel Files", "*.xlsx")]
+            }
+            
+            ext = "xlsx" if fmt == "excel" else "csv"
+            fpath = filedialog.asksaveasfilename(
+                defaultextension=f".{ext}", 
+                filetypes=filetypes[fmt],
+                title=f"Export Report as {fmt.upper()}"
+            )
+            
+            if not fpath:
+                return
+            
+            if fmt == "csv":
+                import csv
+                with open(fpath, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(("Sale ID", "Date", "Customer", "Product", "Quantity", "Price", "Subtotal", "Supplier"))
+                    writer.writerows(rows)
+            
+            elif fmt == "excel":
+                if OPENPYXL_AVAILABLE:
+                    import openpyxl
+                    wb = openpyxl.Workbook()
+                    ws = wb.active
+                    ws.title = "Sales Report"
+                    ws.append(("Sale ID", "Date", "Customer", "Product", "Quantity", "Price", "Subtotal", "Supplier"))
+                    for r in rows:
+                        ws.append(r)
+                    wb.save(fpath)
+                else:
+                    messagebox.showerror("Error", "OpenPyXL library is not available for Excel export.")
+                    return
+            
+            messagebox.showinfo("Success", f"Report successfully exported to:\n{fpath}")
+            
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export report: {str(e)}")
+
+
+
+        # ---------------- Reports ----------------
+    def _build_reports_tab(self, frame):
+        for w in frame.winfo_children():
+            w.destroy()
+        
+        # Filters frame
+        filter_frame = ttk.Frame(frame, padding=10)
+        filter_frame.pack(fill='x', pady=5)
+        
+        # Date range
+        ttk.Label(filter_frame, text="From:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
+        from_date = DateEntry(filter_frame, width=12) if TKCAL_AVAILABLE else ttk.Entry(filter_frame, width=12)
+        from_date.grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(filter_frame, text="To:").grid(row=0, column=2, padx=5, pady=5, sticky='e')
+        to_date = DateEntry(filter_frame, width=12) if TKCAL_AVAILABLE else ttk.Entry(filter_frame, width=12)
+        to_date.grid(row=0, column=3, padx=5, pady=5)
+        
+        # Product filter
+        ttk.Label(filter_frame, text="Product:").grid(row=0, column=4, padx=5, pady=5, sticky='e')
+        product_entry = ttk.Entry(filter_frame, width=20)
+        product_entry.grid(row=0, column=5, padx=5, pady=5)
+        
+        # Filter button
+        filter_btn = ttk.Button(filter_frame, text="Apply Filters", command=lambda: self._apply_report_filters(
+            from_date.get(), to_date.get(), product_entry.get()
+        ))
+        filter_btn.grid(row=0, column=6, padx=10, pady=5)
+        
+        # Results treeview
+        columns = ('sale_id', 'date', 'customer', 'product', 'quantity', 'price', 'subtotal')
+        tree = ttk.Treeview(frame, columns=columns, show='headings', height=15)
+        
+        # Configure columns
+        for col in columns:
+            tree.heading(col, text=col.replace('_', ' ').title())
+            tree.column(col, width=120, anchor='center')
+        
+        tree.column('sale_id', width=80)
+        tree.column('date', width=150)
+        tree.column('customer', width=150)
+        tree.column('product', width=200)
+        tree.column('quantity', width=80)
+        tree.column('price', width=80)
+        tree.column('subtotal', width=100)
+        
+        tree.pack(fill='both', expand=True, padx=10, pady=10)
+        
         # Export buttons
-        exp_frm = ttk.Frame(frm)
-        exp_frm.pack(fill='x', pady=6)
-        ttk.Button(exp_frm, text="Export CSV", command=lambda: self._export_report(tree, "csv")).pack(side='left', padx=5)
-        ttk.Button(exp_frm, text="Export Excel", command=lambda: self._export_report(tree, "excel")).pack(side='left', padx=5)
-        ttk.Button(exp_frm, text="Export PDF", command=lambda: self._export_report(tree, "pdf")).pack(side='left', padx=5)
+        export_frame = ttk.Frame(frame)
+        export_frame.pack(fill='x', pady=5)
+        
+        ttk.Button(export_frame, text="Export CSV", 
+                command=lambda: self._export_report(tree, "csv")).pack(side='left', padx=5)
+        ttk.Button(export_frame, text="Export Excel", 
+                command=lambda: self._export_report(tree, "excel")).pack(side='left', padx=5)
+        
+        self._report_tree = tree
+        self._load_all_sales()  # Load initial data
+    
+        reports_tab = ttk.Frame(pos_nb)
+        pos_nb.add(reports_tab, text='Sale Reports')
 
-        load_reports()  # Load initially
+        # Use the fixed reports implementation
+        self._build_reports_in_frame(reports_tab)
+
+    def _apply_report_filters(self, from_date, to_date, product_filter):
+        query = '''
+            SELECT 
+                s.id AS sale_id, 
+                s.created_at AS date, 
+                s.customer_name AS customer,
+                p.name AS product, 
+                si.quantity AS quantity, 
+                si.price AS price,
+                (si.quantity * si.price) AS subtotal
+            FROM sales s
+            JOIN sale_items si ON si.sale_id = s.id
+            JOIN products p ON p.id = si.product_id
+            WHERE 1=1
+        '''
+        params = []
+        
+        if from_date:
+            query += " AND date(s.created_at) >= ?"
+            params.append(from_date)
+        
+        if to_date:
+            query += " AND date(s.created_at) <= ?"
+            params.append(to_date)
+        
+        if product_filter:
+            query += " AND p.name LIKE ?"
+            params.append(f'%{product_filter}%')
+        
+        query += " ORDER BY s.created_at DESC"
+        
+        rows = self.db.query(query, params)
+        self._report_tree.delete(*self._report_tree.get_children())
+        
+        for r in rows:
+            self._report_tree.insert('', 'end', values=(
+                r['sale_id'], r['date'], r['customer'] or '',
+                r['product'], r['quantity'], f"{r['price']:.2f}",
+                f"{r['subtotal']:.2f}"
+            ))
+
+    def _load_all_sales(self):
+        rows = self.db.query('''
+            SELECT 
+                s.id AS sale_id, 
+                s.created_at AS date, 
+                s.customer_name AS customer,
+                p.name AS product, 
+                si.quantity AS quantity, 
+                si.price AS price,
+                (si.quantity * si.price) AS subtotal
+            FROM sales s
+            JOIN sale_items si ON si.sale_id = s.id
+            JOIN products p ON p.id = si.product_id
+            ORDER BY s.created_at DESC LIMIT 500
+        ''')
+        
+        self._report_tree.delete(*self._report_tree.get_children())
+        
+        for r in rows:
+            self._report_tree.insert('', 'end', values=(
+                r['sale_id'], r['date'], r['customer'] or '',
+                r['product'], r['quantity'], f"{r['price']:.2f}",
+                f"{r['subtotal']:.2f}"
+            ))
+
+   
 
     # ---------------- Export Helper ----------------
-    def _export_report(self, tree, fmt="csv"):
-        rows = [tree.item(i,"values") for i in tree.get_children()]
-        if not rows:
-            return messagebox.showwarning("No Data","No report data to export.")
-        filetypes = {
-            "csv": [("CSV Files","*.csv")],
-            "excel": [("Excel Files","*.xlsx")],
-            "pdf": [("PDF Files","*.pdf")]
-        }
-        ext = fmt if fmt!="excel" else "xlsx"
-        fpath = filedialog.asksaveasfilename(defaultextension=f".{ext}", filetypes=filetypes[fmt])
-        if not fpath: return
-
-        if fmt=="csv":
-            import csv
-            with open(fpath,"w",newline="",encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(("Sale ID","Customer","Medicine","Supplier","Total","Date"))
-                writer.writerows(rows)
-        elif fmt=="excel" and OPENPYXL_AVAILABLE:
-            import openpyxl
-            wb=openpyxl.Workbook(); ws=wb.active
-            ws.append(("Sale ID","Customer","Medicine","Supplier","Total","Date"))
-            for r in rows: ws.append(r)
-            wb.save(fpath)
-        elif fmt=="pdf" and REPORTLAB_AVAILABLE:
-            from reportlab.lib.pagesizes import A4
-            from reportlab.pdfgen import canvas
-            c=canvas.Canvas(fpath,pagesize=A4); width,height=A4
-            y=height-40
-            c.setFont("Helvetica-Bold",14)
-            c.drawCentredString(width/2,y,"Sales Report"); y-=30
-            c.setFont("Helvetica",9)
-            for row in rows:
-                c.drawString(40,y," | ".join(str(x) for x in row)); y-=14
-                if y<40: c.showPage(); y=height-40
-            c.save()
-        else:
-            messagebox.showerror("Error","Export format not supported or required library missing.")
-        messagebox.showinfo("Exported",f"Report saved to {fpath}")
+    
 
     # ---------------- Manage Staff ----------------
     def _build_manage_staff_tab(self):
