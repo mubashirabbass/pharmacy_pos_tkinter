@@ -1,6 +1,10 @@
+# pharmacy_app_updated.py
+# Inventory + POS + FIFO deduction + LIFO return restock + searchable POS + improved reports + receipt printing
 
-# pharmacy_app.py with Inventory + POS + FIFO deduction + LIFO return restock + receipt on demand
-import os, sqlite3, hashlib, tkinter as tk
+import os
+import sqlite3
+import hashlib
+import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 
@@ -9,7 +13,7 @@ try:
 except ImportError:
     tb = None
 
-# Optional: reportlab is used for PDF receipts
+# Optional: reportlab is used for PDF receipts and reports
 try:
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as pdf_canvas
@@ -86,10 +90,7 @@ def ensure_db():
                formula_id INTEGER,
                unit TEXT,
                sale_price REAL NOT NULL DEFAULT 0,
-               notes TEXT,
-               FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE SET NULL,
-               FOREIGN KEY(manufacturer_id) REFERENCES manufacturers(id) ON DELETE SET NULL,
-               FOREIGN KEY(formula_id) REFERENCES formulas(id) ON DELETE SET NULL
+               notes TEXT
            );'''
     )
 
@@ -115,7 +116,7 @@ def ensure_db():
                       user_id INTEGER,
                       total REAL NOT NULL,
                       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                      FOREIGN KEY(user_id) REFERENCES users(id)
+                      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
                   );''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS sale_items (
@@ -125,7 +126,7 @@ def ensure_db():
                       quantity INTEGER NOT NULL,
                       price REAL NOT NULL,
                       FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE CASCADE,
-                      FOREIGN KEY(product_id) REFERENCES products(id)
+                      FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
                   );''')
 
     # Returns
@@ -318,6 +319,7 @@ class CRUDTab(ttk.Frame):
             self.perform_delete(rid)
             self.refresh()
 
+    # Hooks to be implemented by subclasses
     def fetch_rows(self):
         return []
 
@@ -327,7 +329,9 @@ class CRUDTab(ttk.Frame):
     def perform_delete(self, rid: int):
         pass
 
-# ---------------- Specific Tabs (Categories, Manufacturers, Suppliers, Formulas, Products, Batches) ----------------
+# ---------------- Specific CRUD tabs (categories, manufacturers, suppliers, formulas, products, batches) ----------------
+# (For brevity the logic is standard CRUD - see earlier versions; included below)
+
 class CategoriesTab(CRUDTab):
     def __init__(self, master, db, role):
         super().__init__(master, db, columns=['id','name','notes'], headers=['ID','Name','Notes'], title='Categories', role=role)
@@ -370,6 +374,11 @@ class CategoriesTab(CRUDTab):
 
     def perform_delete(self, rid):
         self.db.execute('DELETE FROM categories WHERE id=?;', (rid,))
+
+# (Manufacturers, Suppliers, Formulas classes omitted here for brevity in message; they are included in the file)
+# Implementations are the same as prior full file and follow same CRUD patterns.
+
+# To keep this code block runnable, include the remaining classes for manufacturers, suppliers, formulas, products and batches:
 
 class ManufacturersTab(CRUDTab):
     def __init__(self, master, db, role):
@@ -682,7 +691,7 @@ class BatchesTab(CRUDTab):
     def perform_delete(self, rid):
         self.db.execute('DELETE FROM batches WHERE id=?;', (rid,))
 
-# ---------------- Main App (Login, Inventory) ----------------
+# ---------------- Login and Main Frames ----------------
 class LoginFrame(ttk.Frame):
     def __init__(self, master, on_login):
         super().__init__(master)
@@ -733,7 +742,6 @@ class InventoryFrame(ttk.Frame):
         nb.pack(fill='both', expand=True, padx=10, pady=10)
 
         role = self.user['role']
-        # Sub-tabs
         self.tab_med = ProductsTab(nb, self.db, is_medical=True, role=role)
         self.tab_non = ProductsTab(nb, self.db, is_medical=False, role=role)
         self.tab_sup = SuppliersTab(nb, self.db, role=role)
@@ -750,23 +758,31 @@ class InventoryFrame(ttk.Frame):
         nb.add(self.tab_for, text='Formulas')
         nb.add(self.tab_bat, text='Batches / Supply')
 
-# ---------------- POS Tabs ----------------
+# ---------------- POS Tabs (NewSale, SaleHistory, Return, ReturnHistory, SalesReport) ----------------
 class NewSaleTab(ttk.Frame):
     def __init__(self, master, db, user):
         super().__init__(master)
         self.db, self.user = db, user
         self.cart = []
+        self.selected_product = None
         self._build()
 
     def _build(self):
-        top = ttk.Frame(self); top.pack(fill='x', padx=10, pady=5)
-        self.products = self.db.query("SELECT id,name,sale_price FROM products ORDER BY name;")
-        names = [p['name'] for p in self.products]
-        ttk.Label(top, text="Product").pack(side='left')
-        self.cbo = ttk.Combobox(top, values=names, state="readonly", width=30)
-        self.cbo.pack(side='left', padx=5)
-        ttk.Label(top, text="Qty").pack(side='left')
-        self.qty_e = ttk.Entry(top, width=5); self.qty_e.pack(side='left')
+        top = ttk.Frame(self)
+        top.pack(fill='x', padx=10, pady=5)
+
+        ttk.Label(top, text="Search product by name or ID").pack(side='left')
+        self.search_e = ttk.Entry(top, width=40)
+        self.search_e.pack(side='left', padx=5)
+        self.search_e.bind("<KeyRelease>", self.update_suggestions)
+
+        self.suggestions = tk.Listbox(self, height=5)
+        self.suggestions.pack(fill='x', padx=10)
+        self.suggestions.bind("<Double-Button-1>", self._on_suggestion_double)
+
+        ttk.Label(top, text="Qty").pack(side='left', padx=(10,0))
+        self.qty_e = ttk.Entry(top, width=5)
+        self.qty_e.pack(side='left', padx=5)
         ttk.Button(top, text="Add", command=self.add_to_cart).pack(side='left', padx=5)
 
         self.tree = ttk.Treeview(self, columns=['product','qty','price','subtotal'], show='headings')
@@ -778,22 +794,52 @@ class NewSaleTab(ttk.Frame):
         self.lbl_total.pack(anchor='e', padx=10)
         ttk.Button(self, text="Checkout", command=self.checkout).pack(anchor='e', padx=10, pady=5)
 
-    def add_to_cart(self):
-        name = self.cbo.get(); qty = int(self.qty_e.get() or 0)
-        prod = next((p for p in self.products if p['name']==name), None)
-        if not prod or qty<=0:
-            messagebox.showwarning("Input", "Select product and enter valid qty")
+    def update_suggestions(self, event=None):
+        term = self.search_e.get().strip()
+        self.suggestions.delete(0, 'end')
+        if not term:
             return
-        self.cart.append({'id':prod['id'],'name':prod['name'],'qty':qty,'price':prod['sale_price'],
-                          'subtotal':prod['sale_price']*qty})
-        self.refresh()
+        rows = self.db.query("SELECT id, name, sale_price FROM products WHERE name LIKE ? OR CAST(id AS TEXT) LIKE ? ORDER BY name LIMIT 50;", (f"%{term}%", f"%{term}%"))
+        for r in rows:
+            self.suggestions.insert('end', f"{r['id']} - {r['name']} - {r['sale_price']}")
+
+    def _on_suggestion_double(self, event=None):
+        sel = self.suggestions.curselection()
+        if not sel:
+            return
+        val = self.suggestions.get(sel[0])
+        pid = int(val.split(' - ')[0])
+        row = self.db.query("SELECT * FROM products WHERE id=?;", (pid,))
+        if row:
+            self.selected_product = row[0]
+            self.search_e.delete(0, 'end')
+            self.search_e.insert(0, f"{self.selected_product['name']}")
+
+    def add_to_cart(self):
+        term = self.search_e.get().strip()
+        qty = int(self.qty_e.get() or 0)
+        prod = None
+        if term.isdigit():
+            rows = self.db.query("SELECT * FROM products WHERE id=?;", (int(term),))
+            if rows: prod = rows[0]
+        if not prod:
+            rows = self.db.query("SELECT * FROM products WHERE name=? LIMIT 1;", (term,))
+            if rows: prod = rows[0]
+        if not prod:
+            messagebox.showwarning("Not found", "Product not found. Use search box and double-click a suggestion.")
+            return
+        if qty <= 0:
+            messagebox.showwarning("Invalid qty", "Enter quantity > 0")
+            return
+        self.cart.append({'id': prod['id'], 'name': prod['name'], 'qty': qty, 'price': prod['sale_price'], 'subtotal': prod['sale_price']*qty})
+        self.search_e.delete(0, 'end'); self.qty_e.delete(0, 'end'); self.refresh()
 
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
-        total=0
-        for i in self.cart:
-            self.tree.insert('', 'end', values=[i['name'],i['qty'],i['price'],i['subtotal']])
-            total+=i['subtotal']
+        total = 0
+        for item in self.cart:
+            self.tree.insert('', 'end', values=[item['name'], item['qty'], item['price'], item['subtotal']])
+            total += item['subtotal']
         self.lbl_total.config(text=f"Total: {total:.2f}")
 
     def checkout(self):
@@ -801,95 +847,50 @@ class NewSaleTab(ttk.Frame):
             messagebox.showwarning("Empty", "Cart is empty")
             return
         total = sum(i['subtotal'] for i in self.cart)
-        sid = self.db.execute(
-            "INSERT INTO sales(user_id,total,created_at) VALUES(?,?,?);",
-            (self.user['id'], total, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-
+        sid = self.db.execute("INSERT INTO sales(user_id,total,created_at) VALUES(?,?,?);", (self.user['id'], total, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         for i in self.cart:
-            # record sale item
-            self.db.execute(
-                "INSERT INTO sale_items(sale_id,product_id,quantity,price) VALUES(?,?,?,?);",
-                (sid, i['id'], i['qty'], i['price'])
-            )
-
-            # FIFO stock deduction
+            self.db.execute("INSERT INTO sale_items(sale_id,product_id,quantity,price) VALUES(?,?,?,?);", (sid, i['id'], i['qty'], i['price']))
+            # FIFO deduction
             qty_needed = i['qty']
-            batches = self.db.query(
-                "SELECT id, quantity FROM batches WHERE product_id=? AND quantity>0 ORDER BY created_at ASC;",
-                (i['id'],)
-            )
+            batches = self.db.query("SELECT id, quantity FROM batches WHERE product_id=? AND quantity>0 ORDER BY created_at ASC;", (i['id'],))
             for b in batches:
-                if qty_needed <= 0:
-                    break
+                if qty_needed <= 0: break
                 take = min(qty_needed, b['quantity'])
-                self.db.execute(
-                    "UPDATE batches SET quantity=quantity-? WHERE id=?;",
-                    (take, b['id'])
-                )
+                self.db.execute("UPDATE batches SET quantity=quantity-? WHERE id=?;", (take, b['id']))
                 qty_needed -= take
-
             if qty_needed > 0:
-                messagebox.showwarning(
-                    "Stock Warning",
-                    f"Product {i['name']} had insufficient stock. Short by {qty_needed}."
-                )
-
-        # Ask whether to print
+                messagebox.showwarning("Stock Warning", f"Product {i['name']} had insufficient stock. Short by {qty_needed}.")
+        # ask to print receipt
         if messagebox.askyesno("Print Receipt", "Do you want to print a receipt?"):
             self.generate_receipt(sid, total)
-
         messagebox.showinfo("Sale Complete", f"Sale #{sid} completed.")
-        self.cart.clear()
-        self.refresh()
+        self.cart.clear(); self.refresh()
 
     def generate_receipt(self, sale_id, total):
         if not REPORTLAB:
-            messagebox.showerror("Missing Package", "reportlab is required to generate PDF receipts.")
+            messagebox.showerror("Missing Package", "reportlab not installed; cannot generate PDF.")
             return
-        items = self.db.query(
-            "SELECT si.quantity, si.price, p.name FROM sale_items si "
-            "JOIN products p ON si.product_id=p.id WHERE si.sale_id=?;",
-            (sale_id,)
-        )
-
-        # Ensure receipts folder
-        folder = os.path.join(os.path.dirname(__file__), "receipts")
-        os.makedirs(folder, exist_ok=True)
+        items = self.db.query("SELECT si.quantity, si.price, p.name FROM sale_items si JOIN products p ON si.product_id=p.id WHERE si.sale_id=?;", (sale_id,))
+        folder = os.path.join(os.path.dirname(__file__), "receipts"); os.makedirs(folder, exist_ok=True)
         filepath = os.path.join(folder, f"receipt_{sale_id}.pdf")
-
-        # Generate PDF
-        c = pdf_canvas.Canvas(filepath, pagesize=A4)
-        width, height = A4
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(50, height-50, "Pharmacy Receipt")
+        c = pdf_canvas.Canvas(filepath, pagesize=A4); width, height = A4
+        y = height - 60
+        c.setFont("Helvetica-Bold", 14); c.drawString(50, y, "Pharmacy Receipt"); y -= 25
+        c.setFont("Helvetica", 10); c.drawString(50, y, f"Sale ID: {sale_id}"); c.drawString(250, y, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"); y -= 20
+        c.drawString(50, y, f"Cashier: {self.user['username']}"); y -= 25
+        c.setFont("Helvetica-Bold", 10); c.drawString(50, y, "Product"); c.drawString(250, y, "Qty"); c.drawString(300, y, "Price"); c.drawString(370, y, "Subtotal"); y -= 15
         c.setFont("Helvetica", 10)
-        c.drawString(50, height-70, f"Sale ID: {sale_id}")
-        c.drawString(200, height-70, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        c.drawString(50, height-90, f"Cashier: {self.user['username']}")
-
-        y = height - 130
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(50, y, "Product"); c.drawString(250, y, "Qty")
-        c.drawString(300, y, "Price"); c.drawString(370, y, "Subtotal")
-        c.setFont("Helvetica", 10)
-        y -= 20
-        for item in items:
-            subtotal = item['price'] * item['quantity']
-            c.drawString(50, y, item['name'])
-            c.drawString(250, y, str(item['quantity']))
-            c.drawString(300, y, f"{item['price']:.2f}")
-            c.drawString(370, y, f"{subtotal:.2f}")
+        for it in items:
+            c.drawString(50, y, str(it['name']))
+            c.drawString(250, y, str(it['quantity']))
+            c.drawString(300, y, f"{it['price']:.2f}")
+            c.drawString(370, y, f"{it['price']*it['quantity']:.2f}")
             y -= 15
             if y < 80:
-                c.showPage()
-                y = height - 80
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(50, y-20, f"Total: {total:.2f}")
+                c.showPage(); y = height - 60
+        c.setFont("Helvetica-Bold", 12); c.drawString(50, y-20, f"Total: {total:.2f}")
         c.save()
-
         messagebox.showinfo("Receipt Saved", f"Receipt saved to {filepath}")
-        # Try to open for printing on Windows
         try:
             os.startfile(filepath)
         except Exception:
@@ -907,18 +908,14 @@ class SaleHistoryTab(ttk.Frame):
         for c in ['id','user','total','created']:
             self.tree.heading(c, text=c.capitalize())
         self.tree.pack(fill='both', expand=True)
-
         btns = ttk.Frame(self); btns.pack(fill='x', pady=6)
         ttk.Button(btns, text="Refresh", command=self.refresh).pack(side='left', padx=6)
         ttk.Button(btns, text="Print Receipt", command=self.print_receipt).pack(side='left', padx=6)
-
         self.refresh()
 
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
-        rows = self.db.query(
-            "SELECT s.id,u.username AS user,s.total,s.created_at as created FROM sales s LEFT JOIN users u ON s.user_id=u.id ORDER BY s.id DESC;"
-        )
+        rows = self.db.query("SELECT s.id,u.username AS user,s.total,s.created_at as created FROM sales s LEFT JOIN users u ON s.user_id=u.id ORDER BY s.id DESC;")
         for r in rows:
             self.tree.insert('', 'end', values=[r['id'], r['user'], r['total'], r['created']])
 
@@ -936,46 +933,21 @@ class SaleHistoryTab(ttk.Frame):
         if not REPORTLAB:
             messagebox.showerror("Missing Package", "reportlab is required to generate PDF receipts.")
             return
-
-        items = self.db.query(
-            "SELECT si.quantity, si.price, p.name FROM sale_items si "
-            "JOIN products p ON si.product_id=p.id WHERE si.sale_id=?;",
-            (sale['id'],)
-        )
-
-        folder = os.path.join(os.path.dirname(__file__), "receipts")
-        os.makedirs(folder, exist_ok=True)
+        items = self.db.query("SELECT si.quantity, si.price, p.name FROM sale_items si JOIN products p ON si.product_id=p.id WHERE si.sale_id=?;", (sale['id'],))
+        folder = os.path.join(os.path.dirname(__file__), "receipts"); os.makedirs(folder, exist_ok=True)
         filepath = os.path.join(folder, f"receipt_{sale['id']}.pdf")
-
-        c = pdf_canvas.Canvas(filepath, pagesize=A4)
-        width, height = A4
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(50, height-50, "Pharmacy Receipt")
+        c = pdf_canvas.Canvas(filepath, pagesize=A4); width, height = A4
+        y = height - 60
+        c.setFont("Helvetica-Bold", 14); c.drawString(50, y, "Pharmacy Receipt"); y -= 25
+        c.setFont("Helvetica", 10); c.drawString(50, y, f"Sale ID: {sale['id']}"); c.drawString(250, y, f"Date: {sale['created']}"); y -= 20
+        c.drawString(50, y, f"Cashier: {sale['user']}"); y -= 25
+        c.setFont("Helvetica-Bold", 10); c.drawString(50, y, "Product"); c.drawString(250, y, "Qty"); c.drawString(300, y, "Price"); c.drawString(370, y, "Subtotal"); y -= 15
         c.setFont("Helvetica", 10)
-        c.drawString(50, height-70, f"Sale ID: {sale['id']}")
-        c.drawString(200, height-70, f"Date: {sale['created']}")
-        c.drawString(50, height-90, f"Cashier: {sale['user']}")
-
-        y = height - 130
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(50, y, "Product"); c.drawString(250, y, "Qty")
-        c.drawString(300, y, "Price"); c.drawString(370, y, "Subtotal")
-        c.setFont("Helvetica", 10)
-        y -= 20
-        for item in items:
-            subtotal = item['price'] * item['quantity']
-            c.drawString(50, y, item['name'])
-            c.drawString(250, y, str(item['quantity']))
-            c.drawString(300, y, f"{item['price']:.2f}")
-            c.drawString(370, y, f"{subtotal:.2f}")
-            y -= 15
+        for it in items:
+            c.drawString(50, y, str(it['name'])); c.drawString(250, y, str(it['quantity'])); c.drawString(300, y, f"{it['price']:.2f}"); c.drawString(370, y, f"{it['price']*it['quantity']:.2f}"); y -= 15
             if y < 80:
-                c.showPage()
-                y = height - 80
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(50, y-20, f"Total: {sale['total']:.2f}")
-        c.save()
-
+                c.showPage(); y = height - 60
+        c.setFont("Helvetica-Bold", 12); c.drawString(50, y-20, f"Total: {sale['total']:.2f}"); c.save()
         messagebox.showinfo("Receipt Saved", f"Receipt saved to {filepath}")
         try:
             os.startfile(filepath)
@@ -984,107 +956,245 @@ class SaleHistoryTab(ttk.Frame):
 
 class ReturnTab(ttk.Frame):
     def __init__(self, master, db):
-        super().__init__(master); self.db=db; self._build()
+        super().__init__(master)
+        self.db = db
+        self._build()
 
     def _build(self):
-        top=ttk.Frame(self); top.pack(fill='x',pady=5)
-        ttk.Label(top,text="Sale ID").pack(side='left')
-        self.sale_e=ttk.Entry(top,width=6); self.sale_e.pack(side='left',padx=5)
-        ttk.Button(top,text="Load",command=self.load_sale).pack(side='left')
-        self.tree=ttk.Treeview(self,columns=['id','product','qty','price','product_id'],show='headings')
-        for c in ['id','product','qty','price','product_id']: self.tree.heading(c,text=c.capitalize())
-        self.tree.pack(fill='both',expand=True)
-        self.qty_e=ttk.Entry(self); self.qty_e.pack(pady=5)
-        self.reason_e=ttk.Entry(self,width=40); self.reason_e.pack(pady=5)
-        ttk.Button(self,text="Process Return",command=self.process_return).pack(pady=5)
+        top = ttk.Frame(self); top.pack(fill='x', pady=5)
+        ttk.Label(top, text="Sale ID").pack(side='left')
+        self.sale_e = ttk.Entry(top, width=8); self.sale_e.pack(side='left', padx=5)
+        ttk.Button(top, text="Load", command=self.load_sale).pack(side='left', padx=5)
+        self.tree = ttk.Treeview(self, columns=['id','product','qty','price','product_id'], show='headings')
+        for c in ['id','product','qty','price','product_id']:
+            self.tree.heading(c, text=c.capitalize())
+        self.tree.pack(fill='both', expand=True, padx=10, pady=5)
+
+        frm = ttk.Frame(self); frm.pack(fill='x', padx=10, pady=5)
+        ttk.Label(frm, text="Return Quantity").grid(row=0, column=0, sticky='w')
+        self.qty_e = ttk.Entry(frm, width=10); self.qty_e.grid(row=0, column=1, sticky='w', padx=6)
+        ttk.Label(frm, text="Reason for Return").grid(row=1, column=0, sticky='w', pady=(6,0))
+        self.reason_e = ttk.Entry(frm, width=40); self.reason_e.grid(row=1, column=1, sticky='w', padx=6, pady=(6,0))
+        ttk.Button(self, text="Process Return", command=self.process_return).pack(pady=6)
 
     def load_sale(self):
-        sid=self.sale_e.get()
-        rows=self.db.query("SELECT si.id,p.name as product,si.quantity as qty,si.price,p.id as product_id FROM sale_items si JOIN products p ON si.product_id=p.id WHERE si.sale_id=?;",(sid,))
+        sid = self.sale_e.get().strip()
+        if not sid:
+            messagebox.showwarning("Input", "Enter sale id to load items")
+            return
+        rows = self.db.query("SELECT si.id, p.name as product, si.quantity as qty, si.price, p.id as product_id FROM sale_items si JOIN products p ON si.product_id=p.id WHERE si.sale_id=?;", (sid,))
         self.tree.delete(*self.tree.get_children())
-        for r in rows: self.tree.insert('', 'end', values=[r['id'],r['product'],r['qty'],r['price'],r['product_id']])
+        for r in rows:
+            self.tree.insert('', 'end', values=[r['id'], r['product'], r['qty'], r['price'], r['product_id']])
 
     def process_return(self):
-        sel=self.tree.selection()
-        if not sel: return
-        vals=self.tree.item(sel[0])['values']
-        sale_item_id, product_id = vals[0], vals[4]
-        qty=int(self.qty_e.get() or 0)
-        reason=self.reason_e.get()
-        if qty<=0:
-            messagebox.showwarning("Input","Enter return quantity > 0")
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Select", "Select the sold item to return")
+            return
+        vals = self.tree.item(sel[0])['values']
+        sale_item_id = vals[0]; product_id = vals[4]
+        try:
+            qty = int(self.qty_e.get() or 0)
+        except:
+            messagebox.showwarning("Input", "Enter valid return quantity")
+            return
+        reason = self.reason_e.get().strip()
+        if qty <= 0:
+            messagebox.showwarning("Input", "Return quantity must be > 0")
             return
         # record return
-        self.db.execute("INSERT INTO returns(sale_item_id,quantity,reason,created_at) VALUES(?,?,?,?);",
-            (sale_item_id,qty,reason,datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        self.db.execute("INSERT INTO returns(sale_item_id,quantity,reason,created_at) VALUES(?,?,?,?);", (sale_item_id, qty, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         # restock into most recent batch (LIFO)
-        batch=self.db.query("SELECT id FROM batches WHERE product_id=? ORDER BY created_at DESC LIMIT 1;",(product_id,))
+        batch = self.db.query("SELECT id FROM batches WHERE product_id=? ORDER BY created_at DESC LIMIT 1;", (product_id,))
         if batch:
-            self.db.execute("UPDATE batches SET quantity=quantity+? WHERE id=?;",(qty,batch[0]['id']))
+            self.db.execute("UPDATE batches SET quantity=quantity+? WHERE id=?;", (qty, batch[0]['id']))
         else:
-            # if no batch exists, create one
-            self.db.execute("INSERT INTO batches(product_id,batch_no,quantity,cost_price,created_at) VALUES(?,?,?,?,?);",
-                (product_id,'RETURN',qty,0.0,datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        messagebox.showinfo("Done","Return processed and stock updated.")
+            self.db.execute("INSERT INTO batches(product_id,batch_no,quantity,cost_price,created_at) VALUES(?,?,?,?,?);", (product_id, 'RETURN', qty, 0.0, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        messagebox.showinfo("Done", "Return processed and stock updated.")
 
 class ReturnHistoryTab(ttk.Frame):
     def __init__(self, master, db):
-        super().__init__(master); self.db=db; self._build()
+        super().__init__(master)
+        self.db = db
+        self._build()
+
     def _build(self):
-        self.tree=ttk.Treeview(self,columns=['id','sale_item','qty','reason','created'],show='headings')
-        for c in ['id','sale_item','qty','reason','created']: self.tree.heading(c,text=c.capitalize())
-        self.tree.pack(fill='both',expand=True)
+        self.tree = ttk.Treeview(self, columns=['id','sale_item','qty','reason','created'], show='headings')
+        for c in ['id','sale_item','qty','reason','created']:
+            self.tree.heading(c, text=c.capitalize())
+        self.tree.pack(fill='both', expand=True)
         self.refresh()
+
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
-        rows=self.db.query("SELECT r.id,r.sale_item_id as sale_item,r.quantity as qty,r.reason,r.created_at as created FROM returns r ORDER BY r.id DESC;")
-        for r in rows: self.tree.insert('', 'end', values=[r['id'],r['sale_item'],r['qty'],r['reason'],r['created']])
+        rows = self.db.query("SELECT r.id, r.sale_item_id as sale_item, r.quantity as qty, r.reason, r.created_at as created FROM returns r ORDER BY r.id DESC;")
+        for r in rows:
+            self.tree.insert('', 'end', values=[r['id'], r['sale_item'], r['qty'], r['reason'], r['created']])
 
 class SalesReportTab(ttk.Frame):
     def __init__(self, master, db):
-        super().__init__(master); self.db=db; self._build()
+        super().__init__(master)
+        self.db = db
+        self._build()
+
     def _build(self):
-        self.tree=ttk.Treeview(self,columns=['date','total'],show='headings')
-        for c in ['date','total']: self.tree.heading(c,text=c.capitalize())
-        self.tree.pack(fill='both',expand=True)
+        top = ttk.Frame(self); top.pack(fill='x', pady=6)
+        ttk.Label(top, text="From (YYYY-MM-DD)").pack(side='left')
+        self.from_e = ttk.Entry(top, width=12); self.from_e.pack(side='left', padx=6)
+        ttk.Label(top, text="To").pack(side='left'); self.to_e = ttk.Entry(top, width=12); self.to_e.pack(side='left', padx=6)
+        ttk.Button(top, text="Generate Report", command=self.refresh).pack(side='left', padx=6)
+        ttk.Button(top, text="Export PDF (detailed)", command=self.export_pdf).pack(side='left', padx=6)
+
+        self.tree = ttk.Treeview(self, columns=['date','product','qty','total'], show='headings')
+        for c in ['date','product','qty','total']:
+            self.tree.heading(c, text=c.capitalize())
+        self.tree.pack(fill='both', expand=True, padx=10, pady=6)
+
         self.refresh()
+
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
-        rows=self.db.query("SELECT substr(created_at,1,10) as date, SUM(total) as total FROM sales GROUP BY date ORDER BY date DESC;")
-        for r in rows: self.tree.insert('', 'end', values=[r['date'],r['total']])
+        from_date = self.from_e.get().strip()
+        to_date = self.to_e.get().strip()
+        params = []
+        date_clause = ""
+        if from_date and to_date:
+            date_clause = "AND s.created_at BETWEEN ? AND ?"
+            params.extend([from_date + " 00:00:00", to_date + " 23:59:59"])
+        elif from_date:
+            date_clause = "AND s.created_at >= ?"; params.append(from_date + " 00:00:00")
+        elif to_date:
+            date_clause = "AND s.created_at <= ?"; params.append(to_date + " 23:59:59")
 
+        sql = f"""
+            SELECT substr(s.created_at,1,10) as date, p.name as product, SUM(si.quantity) as qty, SUM(si.quantity*si.price) as total
+            FROM sales s
+            JOIN sale_items si ON si.sale_id = s.id
+            JOIN products p ON p.id = si.product_id
+            WHERE 1=1 {date_clause}
+            GROUP BY date, p.name
+            ORDER BY date DESC;
+        """
+        rows = self.db.query(sql, tuple(params))
+        for r in rows:
+            self.tree.insert('', 'end', values=[r['date'], r['product'], r['qty'], r['total']])
+
+    def export_pdf(self):
+        if not REPORTLAB:
+            messagebox.showerror("Missing Package", "reportlab required for PDF export")
+            return
+        from_date = self.from_e.get().strip(); to_date = self.to_e.get().strip()
+        params = []
+        date_clause = ""
+        if from_date and to_date:
+            date_clause = "AND s.created_at BETWEEN ? AND ?"
+            params.extend([from_date + " 00:00:00", to_date + " 23:59:59"])
+            title = f"Sales Report {from_date} to {to_date}"
+        elif from_date:
+            date_clause = "AND s.created_at >= ?"; params.append(from_date + " 00:00:00"); title = f"Sales Report from {from_date}"
+        elif to_date:
+            date_clause = "AND s.created_at <= ?"; params.append(to_date + " 23:59:59"); title = f"Sales Report to {to_date}"
+        else:
+            title = "Sales Report (All Time)"
+
+        sql = f"""
+            SELECT substr(s.created_at,1,10) as date, p.name as product, SUM(si.quantity) as qty, SUM(si.quantity*si.price) as total
+            FROM sales s
+            JOIN sale_items si ON si.sale_id = s.id
+            JOIN products p ON p.id = si.product_id
+            WHERE 1=1 {date_clause}
+            GROUP BY date, p.name
+            ORDER BY date DESC;
+        """
+        rows = self.db.query(sql, tuple(params))
+
+        folder = os.path.join(os.path.dirname(__file__), "reports"); os.makedirs(folder, exist_ok=True)
+        filepath = os.path.join(folder, f"sales_report_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf")
+        c = pdf_canvas.Canvas(filepath, pagesize=A4); width, height = A4
+        y = height - 60
+        c.setFont("Helvetica-Bold", 14); c.drawString(50, y, title); y -= 25
+        c.setFont("Helvetica", 10)
+        c.drawString(50, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"); y -= 20
+        c.setFont("Helvetica-Bold", 10); c.drawString(50, y, "Date"); c.drawString(140, y, "Product"); c.drawString(380, y, "Qty"); c.drawString(430, y, "Total"); y -= 15
+        c.setFont("Helvetica", 10)
+        for r in rows:
+            c.drawString(50, y, str(r['date'])[:10])
+            c.drawString(140, y, str(r['product'])[:28])
+            c.drawString(380, y, str(r['qty']))
+            c.drawString(430, y, f"{r['total']:.2f}")
+            y -= 15
+            if y < 80:
+                c.showPage(); y = height - 60
+        c.save()
+        messagebox.showinfo("Report Saved", f"Saved to {filepath}")
+        try:
+            os.startfile(filepath)
+        except Exception:
+            pass
+
+# ---------------- POS Frame wrapper ----------------
 class POSFrame(ttk.Frame):
     def __init__(self, master, user):
-        super().__init__(master); self.user=user; self.db=DB(); self._build()
-    def _build(self):
-        header=ttk.Frame(self); header.pack(fill='x',padx=10,pady=5)
-        ttk.Label(header,text='Point of Sale',font=('Segoe UI',14,'bold')).pack(side='left')
-        ttk.Label(header,text=f"Cashier: {self.user['username']}").pack(side='right')
-        nb=ttk.Notebook(self); nb.pack(fill='both',expand=True)
-        nb.add(NewSaleTab(nb,self.db,self.user),text='New Sale')
-        nb.add(SaleHistoryTab(nb,self.db),text='Sale History')
-        nb.add(ReturnTab(nb,self.db),text='Return Item')
-        nb.add(ReturnHistoryTab(nb,self.db),text='Return History')
-        nb.add(SalesReportTab(nb,self.db),text='Sales Report')
+        super().__init__(master)
+        self.user = user
+        self.db = DB()
+        self._build()
 
-# ---------------- Main App ----------------
+    def _build(self):
+        header = ttk.Frame(self)
+        header.pack(fill='x', padx=10, pady=10)
+        ttk.Label(header, text='Point of Sale', font=('Segoe UI', 14, 'bold')).pack(side='left')
+        ttk.Label(header, text=f"Cashier: {self.user['username']}").pack(side='right')
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill='both', expand=True, padx=10, pady=10)
+
+        self.tab_new = NewSaleTab(nb, self.db, self.user)
+        self.tab_hist = SaleHistoryTab(nb, self.db)
+        self.tab_ret = ReturnTab(nb, self.db)
+        self.tab_ret_hist = ReturnHistoryTab(nb, self.db)
+        self.tab_report = SalesReportTab(nb, self.db)
+
+        nb.add(self.tab_new, text='New Sale')
+        nb.add(self.tab_hist, text='Sale History')
+        nb.add(self.tab_ret, text='Return Item')
+        nb.add(self.tab_ret_hist, text='Return History')
+        nb.add(self.tab_report, text='Sales Report')
+
+# ---------------- App ----------------
 class App:
     def __init__(self):
         ensure_db()
-        self.root=tb.Window(themename='cosmo') if tb else tk.Tk()
+        self.root = tb.Window(themename='cosmo') if tb else tk.Tk()
         self.root.title('Pharmacy Management System')
-        self.root.geometry('1100x700')
-        self.container=ttk.Frame(self.root); self.container.pack(fill='both',expand=True)
-        self.show_login()
-    def clear(self):
-        for w in self.container.winfo_children(): w.destroy()
-    def show_login(self):
-        self.clear(); LoginFrame(self.container,self.on_login).pack(fill='both',expand=True)
-    def on_login(self,user):
-        self.clear(); outer=ttk.Notebook(self.container); outer.pack(fill='both',expand=True)
-        outer.add(InventoryFrame(outer,user),text='Inventory')
-        outer.add(POSFrame(outer,user),text='POS')
-    def run(self): self.root.mainloop()
+        self.root.geometry('1150x750')
 
-if __name__=='__main__':
+        self.container = ttk.Frame(self.root)
+        self.container.pack(fill='both', expand=True)
+
+        self.show_login()
+
+    def clear(self):
+        for w in self.container.winfo_children():
+            w.destroy()
+
+    def show_login(self):
+        self.clear()
+        lf = LoginFrame(self.container, on_login=self.on_login)
+        lf.pack(fill='both', expand=True)
+
+    def on_login(self, user):
+        self.clear()
+        outer = ttk.Notebook(self.container)
+        outer.pack(fill='both', expand=True)
+        inv = InventoryFrame(outer, user)
+        pos = POSFrame(outer, user)
+        outer.add(inv, text='Inventory')
+        outer.add(pos, text='POS')
+
+    def run(self):
+        self.root.mainloop()
+
+if __name__ == '__main__':
     App().run()
