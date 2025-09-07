@@ -1462,69 +1462,6 @@ class App:
             # Simple fallback
             ttk.Label(reports_tab, text="Reports functionality not available").pack(pady=20)
 
-    # def _build_pos_tab(self):
-    #     # Clear POS tab
-    #     for w in self.tab_pos.winfo_children():
-    #         w.destroy()
-    #     pos_nb = ttk.Notebook(self.tab_pos)
-    #     pos_nb.pack(fill='both', expand=True, padx=8, pady=8)
-
-    #     # --- New Sale ---
-    #     new_sale_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(new_sale_tab, text='New Sale')
-    #     NewSaleTab(new_sale_tab, self.db, self.user).pack(fill='both', expand=True)
-
-    #     # --- Sale History ---
-    #     history_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(history_tab, text='Sale History')
-    #     self._sale_history_tree = ttk.Treeview(
-    #         history_tab,
-    #         columns=('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'),
-    #         show='headings', height=18
-    #     )
-    #     for c in ('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'):
-    #         self._sale_history_tree.heading(c, text=c.capitalize())
-    #         self._sale_history_tree.column(c, width=120, anchor='w')
-    #     self._sale_history_tree.pack(fill='both', expand=True, padx=8, pady=8)
-    #     btns = ttk.Frame(history_tab)
-    #     btns.pack(fill='x')
-    #     ttk.Button(btns, text='Refresh', command=self._sale_history_refresh).pack(side='left', padx=6)
-    #     ttk.Button(btns, text='Print Receipt (Selected)', command=self._sale_history_print_selected).pack(side='left', padx=6)
-    #     try:
-    #         self._sale_history_refresh()
-    #     except Exception:
-    #         pass
-
-    #     # --- Return History ---
-    #     returns_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(returns_tab, text='Return History')
-    #     self._return_tree = ttk.Treeview(
-    #         returns_tab,
-    #         columns=('id','sale_item','product','qty','reason','created','expiry'),
-    #         show='headings'
-    #     )
-    #     for c in ('id','sale_item','product','qty','reason','created','expiry'):
-    #         self._return_tree.heading(c, text=c.capitalize())
-    #         self._return_tree.column(c, width=120, anchor='w')
-    #     self._return_tree.pack(fill='both', expand=True, padx=8, pady=8)
-    #     ttk.Button(returns_tab, text='Refresh', command=self._return_refresh).pack(anchor='e', padx=8, pady=6)
-    #     try:
-    #         self._return_refresh()
-    #     except Exception:
-    #         pass
-
-    #     # --- Sale Reports ---
-    #     reports_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(reports_tab, text='Sale Reports')
-    #     try:
-    #         self._build_reports_tab(reports_tab)
-    #     except Exception as e:
-    #         print(f"Error building modern reports: {e}")
-    #         # Fallback to old method
-    #         try:
-    #             self._build_reports_in_frame(reports_tab)
-    #         except Exception:
-    #             pass
 
 
     def _build_sale_history_tab(self):
@@ -1623,7 +1560,7 @@ class App:
             tree.insert('', 'end', values=(r['id'], r['sale_item'], r['product'], r['qty'], r['reason'], r['created'], r['expiry'] or ''))
 
     # ---------------- Reports (build into provided frame) ----------------
-    # ... rest of your code ...
+  
 
     def _build_reports_in_frame(self, frame):
         for w in frame.winfo_children(): 

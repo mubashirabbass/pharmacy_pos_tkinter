@@ -86,6 +86,7 @@ class DB:
 
     def _ensure(self):
         con = self.connect(); cur = con.cursor()
+
         # users - FIXED: Added 'staff' to the CHECK constraint
         cur.execute('''CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +100,7 @@ class DB:
                 ('admin', hash_pw('admin123'), 'admin'),
                 ('cashier', hash_pw('cashier123'), 'cashier'),
             ])
+
         # customers
         cur.execute('''CREATE TABLE IF NOT EXISTS customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,12 +108,14 @@ class DB:
             phone TEXT UNIQUE,
             notes TEXT
         );''')
+
         # categories/manufacturers/suppliers/formulas
         cur.execute('''CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, notes TEXT);''')
         cur.execute('''CREATE TABLE IF NOT EXISTS manufacturers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, contact TEXT, notes TEXT);''')
         cur.execute('''CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, phone TEXT, email TEXT, address TEXT);''')
         cur.execute('''CREATE TABLE IF NOT EXISTS formulas (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, composition TEXT);''')
-        # products & batches
+
+        # products
         cur.execute('''CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -124,6 +128,8 @@ class DB:
             sale_price REAL DEFAULT 0,
             notes TEXT
         );''')
+
+        # batches
         cur.execute('''CREATE TABLE IF NOT EXISTS batches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL,
@@ -136,6 +142,34 @@ class DB:
             FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
             FOREIGN KEY(supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL
         );''')
+
+        # --- Ensure manufacturer_id exists in batches for existing DB ---
+        cur.execute("PRAGMA table_info(batches);")
+        columns = [c['name'] for c in cur.fetchall()]
+        if 'manufacturer_id' not in columns:
+            # Add manufacturer_id column
+            cur.execute("ALTER TABLE batches ADD COLUMN manufacturer_id INTEGER;")
+            # Update table with proper foreign key
+            cur.execute("PRAGMA foreign_keys=off;")
+            cur.execute("""CREATE TABLE IF NOT EXISTS batches_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                supplier_id INTEGER,
+                manufacturer_id INTEGER,
+                batch_no TEXT,
+                quantity INTEGER NOT NULL,
+                expiry_date TEXT,
+                cost_price REAL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+                FOREIGN KEY(supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL,
+                FOREIGN KEY(manufacturer_id) REFERENCES manufacturers(id) ON DELETE SET NULL
+            );""")
+            cur.execute("INSERT INTO batches_new SELECT id, product_id, supplier_id, NULL, batch_no, quantity, expiry_date, cost_price, created_at FROM batches;")
+            cur.execute("DROP TABLE batches;")
+            cur.execute("ALTER TABLE batches_new RENAME TO batches;")
+            cur.execute("PRAGMA foreign_keys=on;")
+
         # sales & items
         cur.execute('''CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,6 +209,7 @@ class DB:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(sale_item_id) REFERENCES sale_items(id) ON DELETE CASCADE
         );''')
+
         # settings
         cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);''')
         def set_if_missing(k,v):
@@ -185,7 +220,9 @@ class DB:
         set_if_missing('pharmacy_name','Pharmacy Receipt')
         set_if_missing('pharmacy_address','123 Main Street, City')
         set_if_missing('auto_backup_enabled','0')
+
         con.commit(); con.close()
+
 
     def query(self, sql, params=()):
         with self.connect() as con:
@@ -721,20 +758,23 @@ class App:
         except Exception:
             ttk.Label(top, text='🏥', font=('Segoe UI', 40)).pack()
 
-        ttk.Label(top, text='Pharmacy Management System', font=('Segoe UI', 22, 'bold')).pack()
-        ttk.Label(top, text='Developed by Your Name', font=('Segoe UI', 12)).pack()
-
+        ttk.Label(top, text='بایو فینِکس فارمیسی', font=('Nori Nastaleeq', 22, 'bold')).pack()
+        ttk.Label(top, text='[-Login Portal-]', font=('Segoe UI', 9,'bold')).pack()
+        from tkinter import font
+    
+        bold_font = font.Font(weight="bold")
         # Login Form
-        ttk.Label(frm, text='Role').grid(row=1, column=0, sticky='e')
+        ttk.Label(frm, text='Login As:', font=bold_font).grid(row=1, column=0, sticky='e')
         role_cb = ttk.Combobox(frm, values=['admin','staff','cashier'], state='readonly')
         role_cb.set('admin')
         role_cb.grid(row=1, column=1, sticky='w', pady=4)
 
-        ttk.Label(frm, text='Username').grid(row=2, column=0, sticky='e')
+        ttk.Label(frm, text='Username', font=bold_font).grid(row=2, column=0, sticky='e')
         user_e = ttk.Entry(frm); user_e.grid(row=2, column=1, sticky='w', pady=4)
 
-        ttk.Label(frm, text='Password').grid(row=3, column=0, sticky='e')
+        ttk.Label(frm, text='Password', font=bold_font).grid(row=3, column=0, sticky='e')
         pw_e = ttk.Entry(frm, show='•'); pw_e.grid(row=3, column=1, sticky='w', pady=4)
+
 
         def try_login():
 
@@ -914,55 +954,6 @@ class App:
         if hasattr(self, 'tab_manage_staff'):
             ttk.Button(quick, text='Manage Staff', command=lambda: self.nb.select(self.tab_manage_staff)).pack(side='left', padx=6)
 
-
-            def make_card(parent, title, value, icon_name, bootstyle, onclick):
-                if TTB_AVAILABLE:
-                    card = tb.Frame(parent, bootstyle=bootstyle)
-                else:
-                    card = ttk.Frame(parent, padding=8, relief='raised')
-                card.pack(side='left', expand=True, fill='both', padx=8, pady=8)
-                if TTB_AVAILABLE and Icon:
-                    try:
-                        ic = Icon(icon_name, size=36)
-                        icon_lbl = ttk.Label(card, image=ic)
-                        icon_lbl.image = ic
-                    except Exception:
-                        icon_lbl = ttk.Label(card, text='●', font=('Segoe UI', 24))
-                else:
-                    icon_lbl = ttk.Label(card, text='●', font=('Segoe UI', 24))
-                icon_lbl.pack(side='left', padx=12, pady=8)
-                txt_fr = ttk.Frame(card); txt_fr.pack(side='left', fill='both', expand=True, padx=6)
-                ttk.Label(txt_fr, text=title, font=('Segoe UI',11,'bold')).pack(anchor='w')
-                val_lbl = ttk.Label(txt_fr, text='0', font=('Segoe UI',20,'bold')); val_lbl.pack(anchor='w', pady=(4,0))
-                def animate_to(target):
-                    target = int(target)
-                    steps = 25
-                    for i in range(1, steps+1):
-                        v = int(target * i / steps)
-                        val_lbl.config(text=str(v))
-                        time.sleep(1.0/steps)
-                threading.Thread(target=lambda: animate_to(value), daemon=True).start()
-                def on_click(e=None):
-                    try:
-                        if onclick: onclick()
-                    except Exception as ex:
-                        print('card click error', ex)
-                for w in (card, icon_lbl, txt_fr, val_lbl): w.bind('<Button-1>', on_click)
-                return card
-
-            sales_total = self.db.query("SELECT COALESCE(SUM(total),0) AS s FROM sales WHERE strftime('%Y-%m',created_at)=strftime('%Y-%m','now');")[0]['s']
-            low_stock_count = self.db.query("""SELECT COUNT(*) AS c FROM (
-                SELECT p.id, COALESCE(SUM(b.quantity),0) AS stock FROM products p LEFT JOIN batches b ON b.product_id=p.id GROUP BY p.id HAVING stock<=5
-            ) t;""")[0]['c']
-            near_expiry_count = self.db.query("SELECT COUNT(*) AS c FROM batches WHERE expiry_date IS NOT NULL AND julianday(expiry_date)-julianday('now')<=30 AND quantity>0;")[0]['c']
-            staff_count = self.db.query("SELECT COUNT(*) AS c FROM users WHERE role IN ('staff','cashier');")[0]['c']
-
-            make_card(cards_row, 'Sales (This Month)', int(sales_total), 'currency-dollar', 'success', lambda: self._open_tab_by_name('Sale History'))
-            make_card(cards_row, 'Low Stock', int(low_stock_count), 'box-seam', 'danger', lambda: self._open_low_stock())
-            make_card(cards_row, 'Near Expiry (30d)', int(near_expiry_count), 'calendar', 'warning', lambda: self._open_near_expiry())
-            if self.user['role'] == 'admin':
-                make_card(cards_row, 'Staff Count', int(staff_count), 'people-fill', 'info', lambda: self._open_tab_by_name('Manage Staff'))
-
             if MATPLOTLIB_AVAILABLE:
                 try:
                     fig = Figure(figsize=(8,2.2), dpi=90); ax = fig.add_subplot(111)
@@ -1122,6 +1113,7 @@ class App:
 
 
         cols = ('id','name','sku','unit','category','manufacturer','price','stock')
+
         def make_prod_tree(parent):
             tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
             # headings
@@ -1331,43 +1323,15 @@ class App:
         for item_data in self._get_batches_data():
             self._batch_tree.insert('', 'end', values=item_data)
             
-    # def _inv_refresh_all(self):
-    #         med_rows = self.db.query('''SELECT p.id,p.name,p.sku,p.unit,c.name as category,m.name as manufacturer,p.sale_price as price,
-    #             COALESCE((SELECT SUM(quantity) FROM batches b WHERE b.product_id=p.id),0) AS stock FROM products p
-    #             LEFT JOIN categories c ON p.category_id=c.id LEFT JOIN manufacturers m ON p.manufacturer_id=m.id WHERE p.is_medical=1 ORDER BY p.name;''')
-    #         self._med_tree.delete(*self._med_tree.get_children())
-    #         for r in med_rows: self._med_tree.insert('', 'end', iid=r['id'], values=(r['id'], r['name'], r['sku'] or '', r.get('unit','') or '', r.get('category') or '', r.get('manufacturer') or '', f"{r['price']:.2f}", r['stock']))
-
-    #         non_rows = self.db.query('''SELECT p.id,p.name,p.sku,p.unit,c.name as category,m.name as manufacturer,p.sale_price as price,
-    #             COALESCE((SELECT SUM(quantity) FROM batches b WHERE b.product_id=p.id),0) AS stock FROM products p
-    #             LEFT JOIN categories c ON p.category_id=c.id LEFT JOIN manufacturers m ON p.manufacturer_id=m.id WHERE p.is_medical=0 ORDER BY p.name;''')
-    #         self._nonmed_tree.delete(*self._nonmed_tree.get_children())
-    #         for r in non_rows: self._nonmed_tree.insert('', 'end', iid=r['id'], values=(r['id'], r['name'], r['sku'] or '', r.get('unit','') or '', r.get('category') or '', r.get('manufacturer') or '', f"{r['price']:.2f}", r['stock']))
-
-    #         self._sup_tree.delete(*self._sup_tree.get_children())
-    #         for r in self.db.query('SELECT id,name,phone,email,address FROM suppliers ORDER BY name;'): self._sup_tree.insert('', 'end', values=(r['id'],r['name'],r['phone'] or '', r['email'] or '', r['address'] or ''))
-
-    #         self._man_tree.delete(*self._man_tree.get_children())
-    #         for r in self.db.query('SELECT id,name,contact,notes FROM manufacturers ORDER BY name;'): self._man_tree.insert('', 'end', values=(r['id'],r['name'],r['contact'] or '', r['notes'] or ''))
-
-    #         self._cat_tree.delete(*self._cat_tree.get_children())
-    #         for r in self.db.query('SELECT id,name,notes FROM categories ORDER BY name;'): self._cat_tree.insert('', 'end', values=(r['id'],r['name'],r['notes'] or ''))
-
-    #         self._form_tree.delete(*self._form_tree.get_children())
-    #         for r in self.db.query('SELECT id,name,composition FROM formulas ORDER BY name;'): self._form_tree.insert('', 'end', values=(r['id'],r['name'],r['composition'] or ''))
-
-    #         self._batch_tree.delete(*self._batch_tree.get_children())
-    #         rows = self.db.query('SELECT b.id, p.name as product, b.batch_no, b.quantity, b.expiry_date, s.name as supplier FROM batches b LEFT JOIN products p ON p.id=b.product_id LEFT JOIN suppliers s ON s.id=b.supplier_id ORDER BY b.id DESC;')
-    #         for r in rows: self._batch_tree.insert('', 'end', values=(r['id'], r['product'], r['batch_no'] or '', r['quantity'], r['expiry_date'] or '', r['supplier'] or ''))
-
     def _inv_add_product(self, is_medical=1):
         cats = [r['name'] for r in self.db.query('SELECT name FROM categories ORDER BY name;')]
         mans = [r['name'] for r in self.db.query('SELECT name FROM manufacturers ORDER BY name;')]
         forms = [r['name'] for r in self.db.query('SELECT name FROM formulas ORDER BY name;')]
         units = ['mg','ml','g','IU','tablet','capsule','bottle','strip','box']
-        
+
         def save(d):
-            if not d.get('name'): return messagebox.showerror('Error','Name required')
+            if not d.get('name'):
+                return messagebox.showerror('Error','Name required')
             cid = mid = fid = None
             if d.get('category'):
                 row = self.db.query('SELECT id FROM categories WHERE name=?;',(d['category'],))
@@ -1387,35 +1351,28 @@ class App:
                 messagebox.showinfo('Saved','Product added'); self._inv_refresh_all()
             except Exception as e:
                 messagebox.showerror('Error', str(e))
-        
+
         fields = [
             {'key':'name','label':'Name'},
             {'key':'sku','label':'SKU'},
             {'key':'unit','label':'Unit','widget':'combobox','values':units,'state':'normal'},
-            {'key':'category','label':'Category','widget':'entry'},
-            {'key':'manufacturer','label':'Manufacturer','widget':'entry'},
-            {'key':'formula','label':'Formula','widget':'entry'},
+            {'key':'category','label':'Category','widget':'combobox','values':cats,'state':'normal'},
+            {'key':'manufacturer','label':'Manufacturer','widget':'combobox','values':mans,'state':'normal'},
+            {'key':'formula','label':'Formula','widget':'combobox','values':forms,'state':'normal'},
             {'key':'price','label':'Sale Price'},
             {'key':'notes','label':'Notes','widget':'text'}
         ]
-        
-        dlg = FormDialog(self.root, 'Add Product', fields, on_submit=save)
-        
-        # Add autocomplete functionality after creating the widgets
-        for key in ['category', 'manufacturer', 'formula']:
-            if key in dlg.widgets:
-                entry_widget = dlg.widgets[key][0]
-                # Convert to AutocompleteEntry
-                if key == 'category':
-                    entry_widget.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                        "SELECT name FROM categories WHERE name LIKE ? ORDER BY name", (f"%{term}%",))]
-                elif key == 'manufacturer':
-                    entry_widget.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                        "SELECT name FROM manufacturers WHERE name LIKE ? ORDER BY name", (f"%{term}%",))]
-                elif key == 'formula':
-                    entry_widget.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                        "SELECT name FROM formulas WHERE name LIKE ? ORDER BY name", (f"%{term}%",))]
 
+        dlg = FormDialog(self.root, 'Add Product', fields, on_submit=save)
+
+        # Make comboboxes searchable
+        self.make_searchable(dlg.widgets['unit'][0], units)
+        self.make_searchable(dlg.widgets['category'][0], cats)
+        self.make_searchable(dlg.widgets['manufacturer'][0], mans)
+        self.make_searchable(dlg.widgets['formula'][0], forms)
+
+
+   
     def _inv_edit_product(self, tree):
         sel = tree.selection()
         if not sel: return messagebox.showwarning('Select','Select a product to edit')
@@ -1425,8 +1382,12 @@ class App:
         if not row: return messagebox.showerror('Error','Not found')
         row = row[0]
         initial = {'name':row['name'],'sku':row['sku'] or '','unit':row['unit'] or '','category':row.get('category_name') or '','manufacturer':row.get('manufacturer_name') or '','formula':row.get('formula_name') or '','price':row['sale_price'],'notes':row['notes']}
-        units = ['mg','ml','g','IU','tablet','capsule','bottle','strip','box']
         
+        cats = [r['name'] for r in self.db.query('SELECT name FROM categories ORDER BY name;')]
+        mans = [r['name'] for r in self.db.query('SELECT name FROM manufacturers ORDER BY name;')]
+        forms = [r['name'] for r in self.db.query('SELECT name FROM formulas ORDER BY name;')]
+        units = ['mg','ml','g','IU','tablet','capsule','bottle','strip','box']
+
         def save(d):
             cid = mid = fid = None
             if d.get('category'):
@@ -1447,34 +1408,26 @@ class App:
                 messagebox.showinfo('Saved','Product updated'); self._inv_refresh_all()
             except Exception as e:
                 messagebox.showerror('Error', str(e))
-        
+
         fields = [
             {'key':'name','label':'Name'},
             {'key':'sku','label':'SKU'},
             {'key':'unit','label':'Unit','widget':'combobox','values':units,'state':'normal'},
-            {'key':'category','label':'Category','widget':'entry'},
-            {'key':'manufacturer','label':'Manufacturer','widget':'entry'},
-            {'key':'formula','label':'Formula','widget':'entry'},
+            {'key':'category','label':'Category','widget':'combobox','values':cats,'state':'normal'},
+            {'key':'manufacturer','label':'Manufacturer','widget':'combobox','values':mans,'state':'normal'},
+            {'key':'formula','label':'Formula','widget':'combobox','values':forms,'state':'normal'},
             {'key':'price','label':'Sale Price'},
             {'key':'notes','label':'Notes','widget':'text'}
         ]
-        
+
         dlg = FormDialog(self.root, 'Edit Product', fields, initial=initial, on_submit=save)
-        
-        # Add autocomplete functionality after creating the widgets
-        for key in ['category', 'manufacturer', 'formula']:
-            if key in dlg.widgets:
-                entry_widget = dlg.widgets[key][0]
-                # Convert to AutocompleteEntry
-                if key == 'category':
-                    entry_widget.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                        "SELECT name FROM categories WHERE name LIKE ? ORDER BY name", (f"%{term}%",))]
-                elif key == 'manufacturer':
-                    entry_widget.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                        "SELECT name FROM manufacturers WHERE name LIKE ? ORDER BY name", (f"%{term}%",))]
-                elif key == 'formula':
-                    entry_widget.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                        "SELECT name FROM formulas WHERE name LIKE ? ORDER BY name", (f"%{term}%",))]
+
+        # Make comboboxes searchable
+        self.make_searchable(dlg.widgets['unit'][0], units)
+        self.make_searchable(dlg.widgets['category'][0], cats)
+        self.make_searchable(dlg.widgets['manufacturer'][0], mans)
+        self.make_searchable(dlg.widgets['formula'][0], forms)
+
 
     def _inv_delete_product(self, tree):
         sel = tree.selection()
@@ -1616,76 +1569,76 @@ class App:
             self.db.execute('DELETE FROM formulas WHERE id=?;',(fid,)); messagebox.showinfo('Deleted','Formula deleted'); self._inv_refresh_all()
         except Exception as e: messagebox.showerror('Error',str(e))
 
-    # Batches CRUD
-   
-        
-    def _add_batch(self):
-        def save(d):
-            pid = None; sid = None; mid = None
-            p = self.db.query('SELECT id FROM products WHERE name=?;',(d.get('product'),))
-            if p: pid = p[0]['id']
-            if d.get('supplier'):
-                s = self.db.query('SELECT id FROM suppliers WHERE name=?;',(d.get('supplier'),))
-                if s: sid = s[0]['id']
-            if d.get('manufacturer'):
-                m = self.db.query('SELECT id FROM manufacturers WHERE name=?;',(d.get('manufacturer'),))
-                if m: mid = m[0]['id']
-            if not pid: return messagebox.showerror('Error','Product required and must exist')
-            try:
-                self.db.execute('INSERT INTO batches(product_id,supplier_id,batch_no,quantity,expiry_date,cost_price,created_at) VALUES(?,?,?,?,?,?,?);',
-                                (pid, sid, d.get('batch_no') or '', int(d.get('quantity') or 0), d.get('expiry') or None, float(d.get('cost_price') or 0), now_str()))
-                messagebox.showinfo('Saved','Batch added'); self._inv_refresh_all()
-            except Exception as e: messagebox.showerror('Error',str(e))
-        
-        # Create the form dialog first
-        fields = [
-            {'key':'product','label':'Product','widget':'entry'},
-            {'key':'supplier','label':'Supplier','widget':'entry'},
-            {'key':'manufacturer','label':'Manufacturer','widget':'entry'},
-            {'key':'batch_no','label':'Batch No'},
-            {'key':'quantity','label':'Quantity'},
-            {'key':'expiry','label':'Expiry (YYYY-MM-DD)'},
-            {'key':'cost_price','label':'Cost Price'}
-        ]
-        
-        dlg = FormDialog(self.root, 'Add Batch', fields, on_submit=save)
-        
-        # Add autocomplete functionality after creating the widgets
-        if 'product' in dlg.widgets:
-            product_entry = dlg.widgets['product'][0]
-            product_entry.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                "SELECT name FROM products WHERE name LIKE ? ORDER BY name LIMIT 10", (f"%{term}%",))]
-        
-        if 'supplier' in dlg.widgets:
-            supplier_entry = dlg.widgets['supplier'][0]
-            supplier_entry.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                "SELECT name FROM suppliers WHERE name LIKE ? ORDER BY name LIMIT 10", (f"%{term}%",))]
-        
-        if 'manufacturer' in dlg.widgets:
-            manufacturer_entry = dlg.widgets['manufacturer'][0]
-            manufacturer_entry.suggestions_getter = lambda term: [r['name'] for r in self.db.query(
-                "SELECT name FROM manufacturers WHERE name LIKE ? ORDER BY name LIMIT 10", (f"%{term}%",))]
-        
-        # Add functionality to auto-fill manufacturer when product is selected
-        def on_product_select(event=None):
-            product_name = dlg.widgets['product'][0].get().strip()
-            if product_name:
-                # Get manufacturer for this product
-                result = self.db.query('''
-                    SELECT m.name 
-                    FROM products p 
-                    LEFT JOIN manufacturers m ON p.manufacturer_id = m.id 
-                    WHERE p.name = ? LIMIT 1
-                ''', (product_name,))
-                
-                if result and result[0]['name']:
-                    dlg.widgets['manufacturer'][0].delete(0, 'end')
-                    dlg.widgets['manufacturer'][0].insert(0, result[0]['name'])
-        
-        # Bind the product entry to auto-fill manufacturer
-        dlg.widgets['product'][0].bind('<FocusOut>', on_product_select)
-        dlg.widgets['product'][0].bind('<Return>', on_product_select)
 
+    def make_searchable(self, cb_widget, original_values):
+        def on_keyrelease(event):
+            typed = cb_widget.get()
+            if typed == '':
+                cb_widget['values'] = original_values  # show all if empty
+            else:
+                # Only items starting with typed string (case-insensitive)
+                filtered = [v for v in original_values if v.lower().startswith(typed.lower())]
+                cb_widget['values'] = filtered
+            if cb_widget['values']:
+                cb_widget.event_generate('<Down>')  # open dropdown automatically
+
+        cb_widget.bind('<KeyRelease>', on_keyrelease)
+
+
+    def _add_batch(self):
+        # Fetch data from database
+        products = [r['name'] for r in self.db.query('SELECT name FROM products ORDER BY name;')]
+        suppliers = [r['name'] for r in self.db.query('SELECT name FROM suppliers ORDER BY name;')]
+        manufacturers = [r['name'] for r in self.db.query('SELECT name FROM manufacturers ORDER BY name;')]
+
+        # Function to save batch
+        def save(d):
+            pid = sid = mid = None
+
+            p = self.db.query('SELECT id FROM products WHERE name=?;', (d.get('product'),))
+            if p: pid = p[0]['id']
+
+            if d.get('supplier'):
+                s = self.db.query('SELECT id FROM suppliers WHERE name=?;', (d.get('supplier'),))
+                if s: sid = s[0]['id']
+
+            if d.get('manufacturer'):
+                m = self.db.query('SELECT id FROM manufacturers WHERE name=?;', (d.get('manufacturer'),))
+                if m: mid = m[0]['id']
+
+            if not pid:
+                return messagebox.showerror('Error', 'Product is required and must exist.')
+
+            try:
+                self.db.execute(
+                    'INSERT INTO batches(product_id, supplier_id, manufacturer_id, batch_no, quantity, expiry_date, cost_price, created_at) '
+                    'VALUES(?,?,?,?,?,?,?,?);',
+                    (pid, sid, mid, d.get('batch_no') or '', int(d.get('quantity') or 0),
+                    d.get('expiry') or None, float(d.get('cost_price') or 0), now_str())
+                )
+                messagebox.showinfo('Saved', 'Batch added successfully.')
+                self._inv_refresh_all()
+            except Exception as e:
+                messagebox.showerror('Error', str(e))
+
+        # Form fields — state='normal' is required for typing
+        fields = [
+            {'key': 'product', 'label': 'Product', 'widget': 'combobox', 'values': products, 'state': 'normal'},
+            {'key': 'supplier', 'label': 'Supplier', 'widget': 'combobox', 'values': suppliers, 'state': 'normal'},
+            {'key': 'manufacturer', 'label': 'Manufacturer', 'widget': 'combobox', 'values': manufacturers, 'state': 'normal'},
+            {'key': 'batch_no', 'label': 'Batch No'},
+            {'key': 'quantity', 'label': 'Quantity'},
+            {'key': 'expiry', 'label': 'Expiry (YYYY-MM-DD)'},
+            {'key': 'cost_price', 'label': 'Cost Price'}
+        ]
+
+        # Open form dialog
+        dlg = FormDialog(self.root, 'Add Batch', fields, on_submit=save)
+
+        # Make Product, Supplier, Manufacturer comboboxes smooth-searchable
+        self.make_searchable(dlg.widgets['product'][0], products)
+        self.make_searchable(dlg.widgets['supplier'][0], suppliers)
+        self.make_searchable(dlg.widgets['manufacturer'][0], manufacturers)
 
     # Find the _edit_batch method and update it to include manufacturer:
     def _edit_batch(self):
@@ -1786,7 +1739,7 @@ class App:
             self.db.execute('DELETE FROM batches WHERE id=?;',(bid,)); messagebox.showinfo('Deleted','Batch deleted'); self._inv_refresh_all()
         except Exception as e: messagebox.showerror('Error',str(e))
 
-    # ---------------- POS with nested tabs ----------------
+     # ---------------- POS with nested tabs ----------------
     def _build_pos_tab(self):
         # Clear POS tab
         for w in self.tab_pos.winfo_children():
@@ -1814,12 +1767,15 @@ class App:
         btns = ttk.Frame(history_tab)
         btns.pack(fill='x')
         ttk.Button(btns, text='Refresh', command=self._sale_history_refresh).pack(side='left', padx=6)
-        ttk.Button(btns_med, text='Clear Filter', command=lambda: (self.med_tab_search_var.set(''), self._inv_refresh_all())).pack(side='right', padx=6)
         ttk.Button(btns, text='Print Receipt (Selected)', command=self._sale_history_print_selected).pack(side='left', padx=6)
         try:
             self._sale_history_refresh()
         except Exception:
             pass
+        # --- Return Item ---
+        return_item_tab = ttk.Frame(pos_nb)
+        pos_nb.add(return_item_tab, text='Return Item')
+        self._build_return_item_tab(return_item_tab)
 
         # --- Return History ---
         returns_tab = ttk.Frame(pos_nb)
@@ -1850,70 +1806,108 @@ class App:
             # Simple fallback
             ttk.Label(reports_tab, text="Reports functionality not available").pack(pady=20)
 
-    # def _build_pos_tab(self):
-    #     # Clear POS tab
-    #     for w in self.tab_pos.winfo_children():
-    #         w.destroy()
-    #     pos_nb = ttk.Notebook(self.tab_pos)
-    #     pos_nb.pack(fill='both', expand=True, padx=8, pady=8)
 
-    #     # --- New Sale ---
-    #     new_sale_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(new_sale_tab, text='New Sale')
-    #     NewSaleTab(new_sale_tab, self.db, self.user).pack(fill='both', expand=True)
+    def _build_return_item_tab(self, frame):
+        # --- Search by Sale ID ---
+        search_frame = ttk.Frame(frame)
+        search_frame.pack(fill="x", padx=10, pady=6)
 
-    #     # --- Sale History ---
-    #     history_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(history_tab, text='Sale History')
-    #     self._sale_history_tree = ttk.Treeview(
-    #         history_tab,
-    #         columns=('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'),
-    #         show='headings', height=18
-    #     )
-    #     for c in ('sale_id','date','customer','product','qty','price','expiry','supplier','manufacturer','subtotal'):
-    #         self._sale_history_tree.heading(c, text=c.capitalize())
-    #         self._sale_history_tree.column(c, width=120, anchor='w')
-    #     self._sale_history_tree.pack(fill='both', expand=True, padx=8, pady=8)
-    #     btns = ttk.Frame(history_tab)
-    #     btns.pack(fill='x')
-    #     ttk.Button(btns, text='Refresh', command=self._sale_history_refresh).pack(side='left', padx=6)
-    #     ttk.Button(btns, text='Print Receipt (Selected)', command=self._sale_history_print_selected).pack(side='left', padx=6)
-    #     try:
-    #         self._sale_history_refresh()
-    #     except Exception:
-    #         pass
+        ttk.Label(search_frame, text="Sale ID:").pack(side="left")
+        self.return_sale_id = ttk.Entry(search_frame, width=15)
+        self.return_sale_id.pack(side="left", padx=6)
 
-    #     # --- Return History ---
-    #     returns_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(returns_tab, text='Return History')
-    #     self._return_tree = ttk.Treeview(
-    #         returns_tab,
-    #         columns=('id','sale_item','product','qty','reason','created','expiry'),
-    #         show='headings'
-    #     )
-    #     for c in ('id','sale_item','product','qty','reason','created','expiry'):
-    #         self._return_tree.heading(c, text=c.capitalize())
-    #         self._return_tree.column(c, width=120, anchor='w')
-    #     self._return_tree.pack(fill='both', expand=True, padx=8, pady=8)
-    #     ttk.Button(returns_tab, text='Refresh', command=self._return_refresh).pack(anchor='e', padx=8, pady=6)
-    #     try:
-    #         self._return_refresh()
-    #     except Exception:
-    #         pass
+        ttk.Button(search_frame, text="Fetch Sale",
+            command=lambda: self._load_sale_for_return(self.return_sale_id.get())
+        ).pack(side="left")
 
-    #     # --- Sale Reports ---
-    #     reports_tab = ttk.Frame(pos_nb)
-    #     pos_nb.add(reports_tab, text='Sale Reports')
-    #     try:
-    #         self._build_reports_tab(reports_tab)
-    #     except Exception as e:
-    #         print(f"Error building modern reports: {e}")
-    #         # Fallback to old method
-    #         try:
-    #             self._build_reports_in_frame(reports_tab)
-    #         except Exception:
-    #             pass
+        # --- Treeview for sale items ---
+        self.return_tree = ttk.Treeview(
+            frame,
+            columns=("id", "product", "qty", "price", "total"),
+            show="headings"
+        )
+        for col in ("id", "product", "qty", "price", "total"):
+            self.return_tree.heading(col, text=col.capitalize())
+            self.return_tree.column(col, width=120, anchor="w")
+        self.return_tree.pack(fill="both", expand=True, padx=10, pady=6)
 
+        # --- Return controls ---
+        control_frame = ttk.Frame(frame)
+        control_frame.pack(fill="x", padx=10, pady=6)
+
+        ttk.Label(control_frame, text="Quantity to Return:").pack(side="left")
+        self.return_qty = ttk.Entry(control_frame, width=10)
+        self.return_qty.pack(side="left", padx=6)
+
+        ttk.Label(control_frame, text="Reason:").pack(side="left")
+        self.return_reason = ttk.Entry(control_frame, width=30)
+        self.return_reason.pack(side="left", padx=6)
+
+        ttk.Button(control_frame, text="Process Return",
+            command=self._process_return
+        ).pack(side="left", padx=6)
+
+    def _load_sale_for_return(self, sale_id):
+        rows = self.db.query("""
+            SELECT si.id, p.name AS product, si.quantity, si.price,
+                (si.quantity * si.price) as total
+            FROM sale_items si
+            JOIN products p ON si.product_id = p.id
+            WHERE si.sale_id = ?;
+        """, (sale_id,))
+        self.return_tree.delete(*self.return_tree.get_children())
+        for r in rows:
+            self.return_tree.insert("", "end", values=(r["id"], r["product"], r["quantity"], r["price"], r["total"]))
+
+    def _process_return(self):
+        selected = self.return_tree.selection()
+        if not selected:
+            messagebox.showerror("Error", "Select an item to return.")
+            return
+
+        item_id, product, qty, price, total = self.return_tree.item(selected[0], "values")
+        return_qty = int(self.return_qty.get() or 0)
+        reason = self.return_reason.get()
+
+        if return_qty <= 0 or return_qty > int(qty):
+            messagebox.showerror("Error", "Invalid return quantity.")
+            return
+
+        # 1. Log the return
+        self.db.execute("""
+            INSERT INTO returns (sale_item_id, quantity, reason)
+            VALUES (?, ?, ?)
+        """, (item_id, return_qty, reason))
+
+        # 2. Restore stock to batches used in this sale
+        batches = self.db.query("""
+            SELECT sib.batch_id, sib.quantity
+            FROM sale_item_batches sib
+            WHERE sib.sale_item_id = ?
+            ORDER BY sib.id ASC;
+        """, (item_id,))
+
+        remain = return_qty
+        for b in batches:
+            if remain <= 0:
+                break
+            give_back = min(remain, b["quantity"])
+            self.db.execute(
+                "UPDATE batches SET quantity = quantity + ? WHERE id = ?;",
+                (give_back, b["batch_id"])
+            )
+            remain -= give_back
+
+        # 3. Update sale_items to reflect reduced sold qty
+        self.db.execute("""
+            UPDATE sale_items
+            SET quantity = quantity - ?
+            WHERE id = ?
+        """, (return_qty, item_id))
+
+        messagebox.showinfo("Success", f"Returned {return_qty} x {product}")
+        # Refresh items for this sale
+        self._load_sale_for_return(self.return_sale_id.get())
 
     def _build_sale_history_tab(self):
         # kept for backward compatibility (not used as top-level)
@@ -2010,119 +2004,85 @@ class App:
         for r in rows:
             tree.insert('', 'end', values=(r['id'], r['sale_item'], r['product'], r['qty'], r['reason'], r['created'], r['expiry'] or ''))
 
-    # ---------------- Reports (build into provided frame) ----------------
-    # ... rest of your code ...
-
+   
+        # ---------------- Reports ----------------
     def _build_reports_in_frame(self, frame):
         for w in frame.winfo_children(): 
             w.destroy()
         
-        # Create filter frame
+        # ---------------- Filters ----------------
         filter_frame = ttk.Frame(frame, padding=10)
         filter_frame.pack(fill='x', pady=5)
         
-        # Date range filter
+        # Date range
         ttk.Label(filter_frame, text="From Date:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
         from_date = ttk.Entry(filter_frame, width=12)
         from_date.grid(row=0, column=1, padx=5, pady=5)
-        ttk.Label(filter_frame, text="(YYYY-MM-DD)").grid(row=0, column=2, padx=2, sticky='w')
         
-        ttk.Label(filter_frame, text="To Date:").grid(row=0, column=3, padx=5, pady=5, sticky='e')
+        ttk.Label(filter_frame, text="To Date:").grid(row=0, column=2, padx=5, pady=5, sticky='e')
         to_date = ttk.Entry(filter_frame, width=12)
-        to_date.grid(row=0, column=4, padx=5, pady=5)
-        ttk.Label(filter_frame, text="(YYYY-MM-DD)").grid(row=0, column=5, padx=2, sticky='w')
+        to_date.grid(row=0, column=3, padx=5, pady=5)
         
         # Product filter with autocomplete
-        ttk.Label(filter_frame, text="Product:").grid(row=1, column=0, padx=5, pady=5, sticky='e')
-        product_filter = AutocompleteEntry(
-            filter_frame, 
-            width=20,
-            suggestions_getter=self._product_suggestions
-        )
-        product_filter.grid(row=1, column=1, padx=5, pady=5)
-
+        ttk.Label(filter_frame, text="Product:").grid(row=0, column=4, padx=5, pady=5, sticky='e')
+        product_filter = AutocompleteEntry(filter_frame, width=20, suggestions_getter=self._product_suggestions)
+        product_filter.grid(row=0, column=5, padx=5, pady=5)
+        
         # Customer filter with autocomplete
-        ttk.Label(filter_frame, text="Customer:").grid(row=1, column=3, padx=5, pady=5, sticky='e')
-        customer_filter = AutocompleteEntry(
-            filter_frame, 
-            width=20,
-            suggestions_getter=self._customer_suggestions
-        )
-        customer_filter.grid(row=1, column=4, padx=5, pady=5)
-
+        ttk.Label(filter_frame, text="Customer:").grid(row=1, column=0, padx=5, pady=5, sticky='e')
+        customer_filter = AutocompleteEntry(filter_frame, width=20, suggestions_getter=self._customer_suggestions)
+        customer_filter.grid(row=1, column=1, padx=5, pady=5)
+        
         # Supplier filter with autocomplete
-        ttk.Label(filter_frame, text="Supplier:").grid(row=1, column=6, padx=5, pady=5, sticky='e')
-        supplier_filter = AutocompleteEntry(
-            filter_frame, 
-            width=20,
-            suggestions_getter=self._supplier_suggestions
-        )
-        supplier_filter.grid(row=1, column=7, padx=5, pady=5)
-
+        ttk.Label(filter_frame, text="Supplier:").grid(row=1, column=2, padx=5, pady=5, sticky='e')
+        supplier_filter = AutocompleteEntry(filter_frame, width=20, suggestions_getter=self._supplier_suggestions)
+        supplier_filter.grid(row=1, column=3, padx=5, pady=5)
+        
         # Filter button
         filter_btn = ttk.Button(filter_frame, text="Apply Filters", 
-                        command=lambda: self._apply_report_filters(
-                            from_date.get(), to_date.get(), product_filter.get(), 
-                            customer_filter.get(), supplier_filter.get()))
+                                command=lambda: self._apply_report_filters(
+                                    from_date.get(), to_date.get(),
+                                    product_filter.get(), customer_filter.get(), supplier_filter.get()
+                                ))
         filter_btn.grid(row=2, column=0, columnspan=4, pady=10)
         
-        # Create report treeview with supplier column
+        # ---------------- Report Treeview ----------------
         columns = ('sale_id', 'date', 'customer', 'product', 'quantity', 'price', 'subtotal', 'supplier')
         tree = ttk.Treeview(frame, columns=columns, show='headings', height=15)
         
-        # Configure columns
-        column_widths = {
-            'sale_id': 80,
-            'date': 150,
-            'customer': 150,
-            'product': 200,
-            'quantity': 80,
-            'price': 80,
-            'subtotal': 100,
-            'supplier': 150
+        col_widths = {
+            'sale_id': 80, 'date': 150, 'customer': 150, 'product': 200,
+            'quantity': 80, 'price': 80, 'subtotal': 100, 'supplier': 150
         }
-        
         for col in columns:
             tree.heading(col, text=col.replace('_', ' ').title())
-            tree.column(col, width=column_widths.get(col, 120), anchor='center')
+            tree.column(col, width=col_widths[col], anchor='center')
         
-        # Add scrollbar
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        scrollbar = ttk.Scrollbar(frame, orient='vertical', command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
-        
         tree.pack(side='left', fill='both', expand=True, padx=10, pady=10)
-        scrollbar.pack(side='right', fill='y', padx=(0, 10), pady=10)
+        scrollbar.pack(side='right', fill='y', padx=(0,10), pady=10)
         
-        # Export buttons frame - placed at the bottom
+        # ---------------- Export Buttons ----------------
         export_frame = ttk.Frame(frame)
         export_frame.pack(fill='x', pady=5, padx=10)
         
         ttk.Button(export_frame, text="Refresh", command=self._load_all_sales).pack(side='left', padx=5)
-        ttk.Button(export_frame, text="Export CSV", 
-                command=lambda: self._export_report(tree, "csv")).pack(side='left', padx=5)
-        ttk.Button(export_frame, text="Export Excel", 
-                command=lambda: self._export_report(tree, "excel")).pack(side='left', padx=5)
+        ttk.Button(export_frame, text="Export CSV", command=lambda: self._export_report(tree, "csv")).pack(side='left', padx=5)
+        ttk.Button(export_frame, text="Export Excel", command=lambda: self._export_report(tree, "excel")).pack(side='left', padx=5)
         
-        # Set the report tree attribute
+        # Save reference
         self._report_tree = tree
-        self._load_all_sales()  # Load initial data
+        self._load_all_sales()
 
-   # Change the method signature to accept all 5 filter parameters
     def _apply_report_filters(self, from_date, to_date, product_filter, customer_filter, supplier_filter):
-        # Check if report tree is initialized
         if not hasattr(self, '_report_tree') or self._report_tree is None:
             return
         
         query = '''
-            SELECT 
-                s.id AS sale_id, 
-                s.created_at AS date, 
-                s.customer_name AS customer,
-                p.name AS product, 
-                si.quantity AS quantity, 
-                si.price AS price,
-                (si.quantity * si.price) AS subtotal,
-                sup.name AS supplier
+            SELECT s.id AS sale_id, s.created_at AS date, s.customer_name AS customer,
+                p.name AS product, si.quantity AS quantity, si.price AS price,
+                (si.quantity * si.price) AS subtotal, sup.name AS supplier
             FROM sales s
             JOIN sale_items si ON si.sale_id = s.id
             JOIN products p ON p.id = si.product_id
@@ -2132,188 +2092,61 @@ class App:
             WHERE 1=1
         '''
         params = []
-        
-        if from_date:
-            query += " AND date(s.created_at) >= ?"
-            params.append(from_date)
-        
-        if to_date:
-            query += " AND date(s.created_at) <= ?"
-            params.append(to_date)
-        
-        if product_filter:
-            query += " AND p.name LIKE ?"
-            params.append(f'%{product_filter}%')
-        
-        if customer_filter:
-            query += " AND s.customer_name LIKE ?"
-            params.append(f'%{customer_filter}%')
-        
-        if supplier_filter:
-            query += " AND sup.name LIKE ?"
-            params.append(f'%{supplier_filter}%')
+        if from_date: params += [from_date]; query += " AND date(s.created_at) >= ?"
+        if to_date:   params += [to_date];   query += " AND date(s.created_at) <= ?"
+        if product_filter:  params += [f'%{product_filter}%']; query += " AND p.name LIKE ?"
+        if customer_filter: params += [f'%{customer_filter}%']; query += " AND s.customer_name LIKE ?"
+        if supplier_filter: params += [f'%{supplier_filter}%']; query += " AND sup.name LIKE ?"
         
         query += " ORDER BY s.created_at DESC"
         
         try:
             rows = self.db.query(query, tuple(params))
             self._report_tree.delete(*self._report_tree.get_children())
-            
             for r in rows:
                 self._report_tree.insert('', 'end', values=(
-                    r['sale_id'], 
-                    r['date'], 
-                    r['customer'] or 'N/A',
-                    r['product'], 
-                    r['quantity'], 
-                    f"{r['price']:.2f}",
-                    f"{r['subtotal']:.2f}",
-                    r['supplier'] or 'N/A'
+                    r['sale_id'], r['date'], r['customer'] or 'N/A',
+                    r['product'], r['quantity'], f"{r['price']:.2f}",
+                    f"{r['subtotal']:.2f}", r['supplier'] or 'N/A'
                 ))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load report data: {str(e)}")
 
-    def _load_all_sales(self):
-        # Check if report tree is initialized
-        if not hasattr(self, '_report_tree') or self._report_tree is None:
-            return
-        
-        try:
-            rows = self.db.query('''
-                SELECT 
-                    s.id AS sale_id, 
-                    s.created_at AS date, 
-                    s.customer_name AS customer,
-                    p.name AS product, 
-                    si.quantity AS quantity, 
-                    si.price AS price,
-                    (si.quantity * si.price) AS subtotal,
-                    sup.name AS supplier
-                FROM sales s
-                JOIN sale_items si ON si.sale_id = s.id
-                JOIN products p ON p.id = si.product_id
-                LEFT JOIN sale_item_batches sib ON sib.sale_item_id = si.id
-                LEFT JOIN batches b ON b.id = sib.batch_id
-                LEFT JOIN suppliers sup ON sup.id = b.supplier_id
-                ORDER BY s.created_at DESC LIMIT 500
-            ''')
-            
-            self._report_tree.delete(*self._report_tree.get_children())
-            
-            for r in rows:
-                self._report_tree.insert('', 'end', values=(
-                    r['sale_id'], 
-                    r['date'], 
-                    r['customer'] or 'N/A',
-                    r['product'], 
-                    r['quantity'], 
-                    f"{r['price']:.2f}",
-                    f"{r['subtotal']:.2f}",
-                    r['supplier'] or 'N/A'
-                ))
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load sales data: {str(e)}")
-
-    def run(self):
-        self.root.mainloop()
-# Fix the _apply_report_filters method to accept the correct number of parameters
-   
-         
-
-    def _load_all_sales(self):
-        try:
-            rows = self.db.query('''
-                SELECT 
-                    s.id AS sale_id, 
-                    s.created_at AS date, 
-                    s.customer_name AS customer,
-                    p.name AS product, 
-                    si.quantity AS quantity, 
-                    si.price AS price,
-                    (si.quantity * si.price) AS subtotal,
-                    sup.name AS supplier
-                FROM sales s
-                JOIN sale_items si ON si.sale_id = s.id
-                JOIN products p ON p.id = si.product_id
-                LEFT JOIN sale_item_batches sib ON sib.sale_item_id = si.id
-                LEFT JOIN batches b ON b.id = sib.batch_id
-                LEFT JOIN suppliers sup ON sup.id = b.supplier_id
-                ORDER BY s.created_at DESC LIMIT 500
-            ''')
-            
-            self._report_tree.delete(*self._report_tree.get_children())
-            
-            for r in rows:
-                self._report_tree.insert('', 'end', values=(
-                    r['sale_id'], 
-                    r['date'], 
-                    r['customer'] or 'N/A',
-                    r['product'], 
-                    r['quantity'], 
-                    f"{r['price']:.2f}",
-                    f"{r['subtotal']:.2f}",
-                    r['supplier'] or 'N/A'
-                ))
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load sales data: {str(e)}")
-
-    
-
-
-    
-    # # Update the columns to include supplier
-    # columns = ('sale_id', 'date', 'customer', 'product', 'quantity', 'price', 'subtotal', 'supplier')
-    # tree = ttk.Treeview(frame, columns=columns, show='headings', height=15)
-
-    # Update column widths
-    column_widths = {
-        'sale_id': 80,
-        'date': 150,
-        'customer': 150,
-        'product': 200,
-        'quantity': 80,
-        'price': 80,
-        'subtotal': 100,
-        'supplier': 150
-    } 
-
-# Update the export methods to handle the new supplier column
-   
+    def _product_suggestions(self, term):
+            rows = self.db.query('SELECT name FROM products WHERE name LIKE ? ORDER BY name LIMIT 10;', (f'%{term}%',))
+            return [r['name'] for r in rows]
 
     def _customer_suggestions(self, term):
         rows = self.db.query('SELECT DISTINCT customer_name FROM sales WHERE customer_name LIKE ? ORDER BY customer_name LIMIT 10;', (f'%{term}%',))
         return [r['customer_name'] for r in rows if r['customer_name']]
 
-
-
+    def _supplier_suggestions(self, term):
+        rows = self.db.query('SELECT name FROM suppliers WHERE name LIKE ? ORDER BY name LIMIT 10;', (f'%{term}%',))
+        return [r['name'] for r in rows if r['name']]
+    
     def _load_all_sales(self):
+        if not hasattr(self, '_report_tree') or self._report_tree is None:
+            return
         try:
             rows = self.db.query('''
-                SELECT 
-                    s.id AS sale_id, 
-                    s.created_at AS date, 
-                    s.customer_name AS customer,
-                    p.name AS product, 
-                    si.quantity AS quantity, 
-                    si.price AS price,
-                    (si.quantity * si.price) AS subtotal
+                SELECT s.id AS sale_id, s.created_at AS date, s.customer_name AS customer,
+                    p.name AS product, si.quantity AS quantity, si.price AS price,
+                    (si.quantity * si.price) AS subtotal,
+                    sup.name AS supplier
                 FROM sales s
                 JOIN sale_items si ON si.sale_id = s.id
                 JOIN products p ON p.id = si.product_id
+                LEFT JOIN sale_item_batches sib ON sib.sale_item_id = si.id
+                LEFT JOIN batches b ON b.id = sib.batch_id
+                LEFT JOIN suppliers sup ON sup.id = b.supplier_id
                 ORDER BY s.created_at DESC LIMIT 500
             ''')
-            
             self._report_tree.delete(*self._report_tree.get_children())
-            
             for r in rows:
                 self._report_tree.insert('', 'end', values=(
-                    r['sale_id'], 
-                    r['date'], 
-                    r['customer'] or 'N/A',
-                    r['product'], 
-                    r['quantity'], 
-                    f"{r['price']:.2f}",
-                    f"{r['subtotal']:.2f}"
+                    r['sale_id'], r['date'], r['customer'] or 'N/A',
+                    r['product'], r['quantity'], f"{r['price']:.2f}",
+                    f"{r['subtotal']:.2f}", r['supplier'] or 'N/A'
                 ))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load sales data: {str(e)}")
@@ -2325,184 +2158,30 @@ class App:
                 messagebox.showwarning("No Data", "No report data to export.")
                 return
             
-            filetypes = {
-                "csv": [("CSV Files", "*.csv")],
-                "excel": [("Excel Files", "*.xlsx")]
-            }
+            filetypes = {"csv": [("CSV Files", "*.csv")], "excel": [("Excel Files", "*.xlsx")]}
+            ext = "xlsx" if fmt=="excel" else "csv"
+            fpath = filedialog.asksaveasfilename(defaultextension=f".{ext}", filetypes=filetypes[fmt], title=f"Export Report as {fmt.upper()}")
+            if not fpath: return
             
-            ext = "xlsx" if fmt == "excel" else "csv"
-            fpath = filedialog.asksaveasfilename(
-                defaultextension=f".{ext}", 
-                filetypes=filetypes[fmt],
-                title=f"Export Report as {fmt.upper()}"
-            )
-            
-            if not fpath:
-                return
-            
-            if fmt == "csv":
+            if fmt=="csv":
                 import csv
                 with open(fpath, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow(("Sale ID", "Date", "Customer", "Product", "Quantity", "Price", "Subtotal", "Supplier"))
+                    writer.writerow(("Sale ID","Date","Customer","Product","Quantity","Price","Subtotal","Supplier"))
                     writer.writerows(rows)
-            
-            elif fmt == "excel":
-                if OPENPYXL_AVAILABLE:
-                    import openpyxl
-                    wb = openpyxl.Workbook()
-                    ws = wb.active
-                    ws.title = "Sales Report"
-                    ws.append(("Sale ID", "Date", "Customer", "Product", "Quantity", "Price", "Subtotal", "Supplier"))
-                    for r in rows:
-                        ws.append(r)
-                    wb.save(fpath)
-                else:
-                    messagebox.showerror("Error", "OpenPyXL library is not available for Excel export.")
-                    return
+            else:
+                import openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "Sales Report"
+                ws.append(("Sale ID","Date","Customer","Product","Quantity","Price","Subtotal","Supplier"))
+                for r in rows: ws.append(r)
+                wb.save(fpath)
             
             messagebox.showinfo("Success", f"Report successfully exported to:\n{fpath}")
-            
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export report: {str(e)}")
 
-
-
-        # ---------------- Reports ----------------
-    def _build_reports_tab(self, frame):
-        for w in frame.winfo_children():
-            w.destroy()
-        
-        # Filters frame
-        filter_frame = ttk.Frame(frame, padding=10)
-        filter_frame.pack(fill='x', pady=5)
-        
-        # Date range
-        ttk.Label(filter_frame, text="From:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
-        from_date = DateEntry(filter_frame, width=12) if TKCAL_AVAILABLE else ttk.Entry(filter_frame, width=12)
-        from_date.grid(row=0, column=1, padx=5, pady=5)
-        
-        ttk.Label(filter_frame, text="To:").grid(row=0, column=2, padx=5, pady=5, sticky='e')
-        to_date = DateEntry(filter_frame, width=12) if TKCAL_AVAILABLE else ttk.Entry(filter_frame, width=12)
-        to_date.grid(row=0, column=3, padx=5, pady=5)
-        
-        # Product filter
-        ttk.Label(filter_frame, text="Product:").grid(row=0, column=4, padx=5, pady=5, sticky='e')
-        product_entry = ttk.Entry(filter_frame, width=20)
-        product_entry.grid(row=0, column=5, padx=5, pady=5)
-        
-        # Filter button
-        filter_btn = ttk.Button(filter_frame, text="Apply Filters", command=lambda: self._apply_report_filters(
-            from_date.get(), to_date.get(), product_entry.get()
-        ))
-        filter_btn.grid(row=0, column=6, padx=10, pady=5)
-        
-        # Results treeview
-        columns = ('sale_id', 'date', 'customer', 'product', 'quantity', 'price', 'subtotal')
-        tree = ttk.Treeview(frame, columns=columns, show='headings', height=15)
-        
-        # Configure columns
-        for col in columns:
-            tree.heading(col, text=col.replace('_', ' ').title())
-            tree.column(col, width=120, anchor='center')
-        
-        tree.column('sale_id', width=80)
-        tree.column('date', width=150)
-        tree.column('customer', width=150)
-        tree.column('product', width=200)
-        tree.column('quantity', width=80)
-        tree.column('price', width=80)
-        tree.column('subtotal', width=100)
-        
-        tree.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        # Export buttons
-        export_frame = ttk.Frame(frame)
-        export_frame.pack(fill='x', pady=5)
-        
-        ttk.Button(export_frame, text="Export CSV", 
-                command=lambda: self._export_report(tree, "csv")).pack(side='left', padx=5)
-        ttk.Button(export_frame, text="Export Excel", 
-                command=lambda: self._export_report(tree, "excel")).pack(side='left', padx=5)
-        
-        self._report_tree = tree
-        self._load_all_sales()  # Load initial data
-    
-        reports_tab = ttk.Frame(pos_nb)
-        pos_nb.add(reports_tab, text='Sale Reports')
-
-        # Use the fixed reports implementation
-        self._build_reports_in_frame(reports_tab)
-
-    def _apply_report_filters(self, from_date, to_date, product_filter):
-        query = '''
-            SELECT 
-                s.id AS sale_id, 
-                s.created_at AS date, 
-                s.customer_name AS customer,
-                p.name AS product, 
-                si.quantity AS quantity, 
-                si.price AS price,
-                (si.quantity * si.price) AS subtotal
-            FROM sales s
-            JOIN sale_items si ON si.sale_id = s.id
-            JOIN products p ON p.id = si.product_id
-            WHERE 1=1
-        '''
-        params = []
-        
-        if from_date:
-            query += " AND date(s.created_at) >= ?"
-            params.append(from_date)
-        
-        if to_date:
-            query += " AND date(s.created_at) <= ?"
-            params.append(to_date)
-        
-        if product_filter:
-            query += " AND p.name LIKE ?"
-            params.append(f'%{product_filter}%')
-        
-        query += " ORDER BY s.created_at DESC"
-        
-        rows = self.db.query(query, params)
-        self._report_tree.delete(*self._report_tree.get_children())
-        
-        for r in rows:
-            self._report_tree.insert('', 'end', values=(
-                r['sale_id'], r['date'], r['customer'] or '',
-                r['product'], r['quantity'], f"{r['price']:.2f}",
-                f"{r['subtotal']:.2f}"
-            ))
-
-    def _load_all_sales(self):
-        rows = self.db.query('''
-            SELECT 
-                s.id AS sale_id, 
-                s.created_at AS date, 
-                s.customer_name AS customer,
-                p.name AS product, 
-                si.quantity AS quantity, 
-                si.price AS price,
-                (si.quantity * si.price) AS subtotal
-            FROM sales s
-            JOIN sale_items si ON si.sale_id = s.id
-            JOIN products p ON p.id = si.product_id
-            ORDER BY s.created_at DESC LIMIT 500
-        ''')
-        
-        self._report_tree.delete(*self._report_tree.get_children())
-        
-        for r in rows:
-            self._report_tree.insert('', 'end', values=(
-                r['sale_id'], r['date'], r['customer'] or '',
-                r['product'], r['quantity'], f"{r['price']:.2f}",
-                f"{r['subtotal']:.2f}"
-            ))
-
-   
-
-    # ---------------- Export Helper ----------------
     
 
     # ---------------- Manage Staff ----------------
