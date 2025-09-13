@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pharmacy System</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    /* Global */
+    body {
+      margin: 0;
+      font-family: 'Poppins', sans-serif;
+      background: #f5f6fa;
+      color: #333;
+    }
+
+    /* ===== Login ===== */
+    #loginPage {
+      display:flex; justify-content:center; align-items:center;
+      height:100vh; background:#f5f6fa;
+    }
+    .login-card {
+      background: white; padding:40px; border-radius:12px;
+      width:350px; box-shadow:0 8px 20px rgba(0,0,0,0.08);
+      text-align:center;
+    }
+    .login-card h2 { font-size:22px; color:#222; margin:0 0 10px; }
+    .login-card p { color:#777; font-size:14px; margin-bottom:20px; }
+    .input-group { margin-bottom:15px; text-align:left; }
+    input, select {
+      width:100%; padding:12px; border:1px solid #ddd;
+      border-radius:8px; font-size:14px;
+    }
+    .btn-primary {
+      width:100%; padding:12px;
+      border:none; border-radius:8px;
+      background:#4e73df; color:white; font-size:15px;
+      cursor:pointer; transition: background .2s;
+    }
+    .btn-primary:hover { background:#2e59d9; }
+    .error { color:#e74a3b; font-size:13px; margin-top:10px; }
+
+    /* ===== Dashboard ===== */
+    #dashboardPage { display:none; height:100vh; }
+    .app { display:flex; height:100%; }
+
+    /* Sidebar */
+    .sidebar {
+      width:240px; background:white; border-right:1px solid #eee;
+      display:flex; flex-direction:column; transition: width 0.3s;
+      overflow:hidden;
+    }
+    .sidebar.collapsed { width:60px; }
+    .sidebar h3 {
+      text-align:center; padding:20px; margin:0;
+      font-size:18px; color:#4e73df; white-space:nowrap;
+    }
+    .sidebar.collapsed h3 { display:none; }
+    .menu { list-style:none; margin:0; padding:0; }
+    .menu li {
+      padding:14px 20px; cursor:pointer;
+      display:flex; align-items:center; gap:10px;
+      color:#333; transition:background .2s;
+      white-space:nowrap;
+    }
+    .menu li:hover { background:#f1f1f1; }
+    .menu i { font-style:normal; font-size:16px; }
+    .menu span { flex:1; }
+    .sidebar.collapsed .menu span { display:none; }
+    .submenu { list-style:none; padding-left:45px; display:none; }
+    .submenu li { padding:8px 0; font-size:14px; color:#666; }
+    .submenu li:hover { color:#000; }
+    .sidebar.collapsed .submenu { display:none !important; }
+
+    /* Main */
+    .main { flex:1; display:flex; flex-direction:column; }
+    .topbar {
+      padding:15px 25px; background:white; border-bottom:1px solid #eee;
+      display:flex; justify-content:space-between; align-items:center;
+      box-shadow:0 2px 6px rgba(0,0,0,0.05);
+    }
+    .toggle-btn {
+      border:none; background:none; font-size:20px; cursor:pointer;
+      margin-right:10px;
+    }
+    .container { padding:20px; overflow:auto; flex:1; }
+
+    /* Cards */
+    .cards { display:flex; gap:15px; flex-wrap:wrap; margin-bottom:20px; }
+    .stat-card {
+      flex:1; min-width:200px; padding:20px;
+      background:white; border-radius:12px; border:1px solid #eee;
+      box-shadow:0 2px 10px rgba(0,0,0,0.05);
+      transition:transform .2s;
+    }
+    .stat-card:hover { transform:translateY(-5px); }
+    .stat-card h4 { font-size:14px; color:#777; margin:0; }
+    .stat-card h2 { font-size:24px; margin-top:8px; color:#222; }
+
+    /* Panels */
+    .panel {
+      background:white; border:1px solid #eee;
+      padding:15px; border-radius:12px;
+      box-shadow:0 2px 10px rgba(0,0,0,0.05);
+      margin-bottom:20px;
+    }
+  </style>
+</head>
+<body>
+  <!-- LOGIN -->
+  <div id="loginPage">
+    <div class="login-card">
+      <h2>🏥 BioFinex Pharmacy</h2>
+      <p>Please sign in to continue</p>
+      <form id="loginForm">
+        <div class="input-group"><input type="text" id="username" placeholder="Username" required></div>
+        <div class="input-group"><input type="password" id="password" placeholder="Password" required></div>
+        <div class="input-group">
+          <select id="role" required>
+            <option value="" disabled selected>Select Role</option>
+            <option value="admin">Admin</option>
+            <option value="cashier">Cashier</option>
+          </select>
+        </div>
+        <button type="submit" class="btn-primary">Login</button>
+      </form>
+      <div id="loginError" class="error"></div>
+    </div>
+  </div>
+
+  <!-- DASHBOARD -->
+  <div id="dashboardPage">
+    <div class="app">
+      <!-- Sidebar -->
+      <nav class="sidebar" id="sidebar">
+        <h3>Dashboard</h3>
+        <ul class="menu">
+          <li onclick="toggleSub('inv')"><i>📦</i><span>Inventory</span></li>
+          <ul class="submenu" id="sub-inv"><li>Products</li><li>Batches</li><li>Reports</li></ul>
+          <li onclick="toggleSub('pos')"><i>🛒</i><span>POS</span></li>
+          <ul class="submenu" id="sub-pos"><li>New Sale</li><li>Sale History</li><li>Returns</li></ul>
+          <li onclick="toggleSub('staff')"><i>👥</i><span>Manage Staff</span></li>
+          <ul class="submenu" id="sub-staff"><li>Add Staff</li><li>Edit Staff</li><li>Delete Staff</li></ul>
+          <li onclick="toggleSub('set')"><i>⚙️</i><span>Settings</span></li>
+          <ul class="submenu" id="sub-set"><li>Profile</li><li>Backup</li><li onclick="logout()">Logout</li></ul>
+        </ul>
+      </nav>
+      <!-- Main -->
+      <div class="main">
+        <div class="topbar">
+          <div>
+            <button class="toggle-btn" onclick="toggleSidebar()">☰</button>
+            Welcome, <span id="loggedUser"></span>
+          </div>
+          <button onclick="logout()" class="btn-primary" style="padding:6px 12px;font-size:12px;">Logout</button>
+        </div>
+        <div class="container">
+          <section class="cards" id="statCards"></section>
+          <div class="panel"><canvas id="salesChart"></canvas></div>
+          <div class="panel"><canvas id="inventoryChart"></canvas></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Login
+    const loginForm=document.getElementById("loginForm");
+    loginForm.addEventListener("submit",(e)=>{
+      e.preventDefault();
+      const user=document.getElementById("username").value;
+      const role=document.getElementById("role").value;
+      if(user && role){
+        document.getElementById("loggedUser").textContent=user+" ("+role+")";
+        document.getElementById("loginPage").style.display="none";
+        document.getElementById("dashboardPage").style.display="block";
+        renderStats(); renderCharts();
+      } else {
+        document.getElementById("loginError").textContent="Invalid login!";
+      }
+    });
+    function logout(){
+      document.getElementById("dashboardPage").style.display="none";
+      document.getElementById("loginPage").style.display="flex";
+    }
+    // Sidebar toggle
+    function toggleSub(key){
+      const sub=document.getElementById("sub-"+key);
+      sub.style.display=sub.style.display==="block"?"none":"block";
+    }
+    function toggleSidebar(){
+      document.getElementById("sidebar").classList.toggle("collapsed");
+    }
+    // Stats
+    function renderStats(){
+      const stats=[
+        { title:"Monthly Sales", value:12500, icon:"💰" },
+        { title:"Products", value:340, icon:"📦" },
+        { title:"Near Expiry", value:7, icon:"⏳" },
+        { title:"Low Stock", value:5, icon:"⚠️" },
+      ];
+      const container=document.getElementById("statCards"); container.innerHTML="";
+      stats.forEach(s=>{
+        const div=document.createElement("div");
+        div.className="stat-card";
+        div.innerHTML=`<h4>${s.icon} ${s.title}</h4><h2>${s.value}</h2>`;
+        container.appendChild(div);
+      });
+    }
+    // Charts
+    function renderCharts(){
+      new Chart(document.getElementById("salesChart"), {
+        type:"line",
+        data:{ labels:["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
+          datasets:[{ label:"Sales", data:[120,250,180,300,270,220,350],
+          borderColor:"#4e73df", backgroundColor:"rgba(78,115,223,0.15)", fill:true, tension:0.3 }]
+        },
+        options:{ responsive:true }
+      });
+      new Chart(document.getElementById("inventoryChart"), {
+        type:"doughnut",
+        data:{ labels:["Products","Near Expiry","Low Stock"],
+          datasets:[{ data:[340,7,5], backgroundColor:["#1cc88a","#f6c23e","#e74a3b"] }] },
+        options:{ responsive:true }
+      });
+    }
+  </script>
+</body>
+</html>

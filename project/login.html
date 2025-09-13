@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BioPhenix — Login</title>
+
+  <!-- Google Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+
+  <!-- Main stylesheet -->
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body class="bg-gradient">
+
+  <div class="page-wrap">
+    <!-- Left decorative column (large image / brand) -->
+    <aside class="left-panel">
+      <div class="brand">
+        <img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><text y='50%' x='50%' dominant-baseline='middle' text-anchor='middle' font-size='40'>🏥</text></svg>"
+             alt="logo" class="brand-logo" />
+        <h1 class="brand-title">بایو فینِکس</h1>
+        <p class="brand-sub">Smart Pharmacy Management</p>
+      </div>
+
+      <div class="promo">
+        <h3>Modern • Fast • Trustworthy</h3>
+        <p>Clean UI inspired by your app — carefully recreated for the web.</p>
+      </div>
+    </aside>
+
+    <!-- Right: login card -->
+    <main class="right-panel">
+      <div class="login-card glass">
+        <div class="login-header">
+          <h2>Login to Dashboard</h2>
+          <p class="muted">Enter credentials and choose the role</p>
+        </div>
+
+        <form id="loginForm" class="login-form" autocomplete="off">
+          <label class="label">Login As</label>
+          <select id="role" class="input">
+            <option value="admin">Admin</option>
+            <option value="staff">Staff</option>
+            <option value="cashier">Cashier</option>
+          </select>
+
+          <label class="label">Username</label>
+          <input id="username" class="input" type="text" placeholder="your.username" required />
+
+          <label class="label">Password</label>
+          <input id="password" class="input" type="password" placeholder="••••••••" required />
+
+          <div class="row-between">
+            <label class="remember">
+              <input type="checkbox" id="remember" /> Remember
+            </label>
+            <a href="#" class="forgot">Forgot?</a>
+          </div>
+
+          <button class="btn btn-primary" type="submit">Sign in</button>
+
+          <div class="login-footer muted">
+            <small>By signing in you agree to the terms. Demo credentials: any / any</small>
+          </div>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

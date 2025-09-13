@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BioPhenix — Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+  <div id="app">
+    <!-- Left Sidebar -->
+    <nav id="sidebar" class="sidebar glass-strong">
+      <div class="sidebar-top">
+        <div class="logo-wrap">
+          <div class="logo-icon">🏥</div>
+          <div class="logo-text">
+            <div class="name">BioPhenix</div>
+            <div class="small muted">Pharmacy</div>
+          </div>
+        </div>
+
+        <button id="collapseBtn" class="icon-btn" title="Toggle">
+          <!-- simple chevron -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7L8 5z" fill="currentColor"/></svg>
+        </button>
+      </div>
+
+      <ul class="nav-list">
+        <li class="nav-item active" data-key="dashboard">
+          <a href="#"><span class="nav-ico">📊</span><span class="nav-label">Dashboard</span></a>
+        </li>
+
+        <li class="nav-item has-sub" data-key="inventory">
+          <a href="#"><span class="nav-ico">📦</span><span class="nav-label">Inventory</span><span class="chev">▾</span></a>
+          <ul class="sublist">
+            <li><a href="#">Medical Products</a></li>
+            <li><a href="#">Non-Medical Products</a></li>
+            <li><a href="#">Suppliers</a></li>
+            <li><a href="#">Manufacturers</a></li>
+            <li><a href="#">Categories</a></li>
+            <li><a href="#">Formulas</a></li>
+            <li><a href="#">Batches</a></li>
+          </ul>
+        </li>
+
+        <li class="nav-item" data-key="pos">
+          <a href="#"><span class="nav-ico">🛒</span><span class="nav-label">POS</span></a>
+        </li>
+
+        <li class="nav-item" data-key="staff">
+          <a href="#"><span class="nav-ico">👥</span><span class="nav-label">Manage Staff</span></a>
+        </li>
+
+        <li class="nav-item" data-key="backup">
+          <a href="#"><span class="nav-ico">💾</span><span class="nav-label">Backup</span></a>
+        </li>
+
+        <li class="nav-item" data-key="settings">
+          <a href="#"><span class="nav-ico">⚙️</span><span class="nav-label">Settings</span></a>
+        </li>
+      </ul>
+
+      <div class="sidebar-footer muted">
+        <small>Logged as <span id="userRoleLabel">User</span></small>
+      </div>
+    </nav>
+
+    <!-- Page content -->
+    <section class="page">
+      <header class="topbar glass">
+        <div class="left">
+          <h2 id="pageTitle">Dashboard</h2>
+        </div>
+        <div class="right">
+          <div class="user-info">
+            <span id="welcomeUser">Welcome</span>
+            <button class="btn ghost" onclick="logout()">Logout</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="content-area">
+        <div class="grid-cards">
+          <div class="card accent-blue" id="card-sales">
+            <div class="card-title">Monthly Sales</div>
+            <div class="card-val" id="val-sales">—</div>
+          </div>
+          <div class="card accent-green" id="card-products">
+            <div class="card-title">Products</div>
+            <div class="card-val" id="val-products">—</div>
+          </div>
+          <div class="card accent-yellow" id="card-expiry">
+            <div class="card-title">Near Expiry</div>
+            <div class="card-val" id="val-expiry">—</div>
+          </div>
+          <div class="card accent-red" id="card-lowstock">
+            <div class="card-title">Low Stock</div>
+            <div class="card-val" id="val-lowstock">—</div>
+          </div>
+        </div>
+
+        <div class="grid-charts">
+          <div class="panel">
+            <h3>Sales (7 days)</h3>
+            <canvas id="salesChart"></canvas>
+          </div>
+          <div class="panel">
+            <h3>Inventory Overview</h3>
+            <canvas id="inventoryChart"></canvas>
+          </div>
+        </div>
+
+        <div class="panel muted small">Design inspired / recreated from your uploaded project files. (UI tokens & look used.)</div>
+      </main>
+    </section>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
